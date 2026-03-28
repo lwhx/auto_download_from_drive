@@ -87,6 +87,9 @@ class SyncDaemon:
             "schema_version": 1,
             "rules": {}
         }
+        self.transfers_path = self.base_dir / "active_transfers.json"
+        self.active_transfers = {}
+        self.transfers_lock = threading.Lock()
         self.logger = self._setup_logging()
 
     def _setup_logging(self) -> logging.Logger:
@@ -496,11 +499,41 @@ class SyncDaemon:
                     self.active_downloads -= 1
                 self.download_queue.task_done()
 
+    def _allocate_rc_port(self) -> int:
+        import socket
+        for port in range(5572, 5583):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                if s.connect_ex(('127.0.0.1', port)) != 0:
+                    return port
+        return 5572
+
+    def _register_active_transfer(self, rule_id: str, source_file: str, pid: int, rc_port: int) -> None:
+        key = self._file_key(rule_id, source_file)
+        with self.transfers_lock:
+            self.active_transfers[key] = {
+                "rule_id": rule_id,
+                "source_file": source_file,
+                "pid": pid,
+                "rc_port": rc_port,
+                "started_at": datetime.now(timezone.utc).isoformat()
+            }
+            with open(self.transfers_path, 'w') as f:
+                json.dump(self.active_transfers, f, indent=2)
+
+    def _unregister_active_transfer(self, rule_id: str, source_file: str) -> None:
+        key = self._file_key(rule_id, source_file)
+        with self.transfers_lock:
+            self.active_transfers.pop(key, None)
+            with open(self.transfers_path, 'w') as f:
+                json.dump(self.active_transfers, f, indent=2)
+
     def handle_download(self, rule_id: str, source_file: str, dest_path: str) -> None:
         if self.stop_event.is_set():
             return
 
-        command = [self.config["rclone_command"], "copy", source_file, dest_path]
+        rc_port = self._allocate_rc_port()
+        command = [self.config["rclone_command"], "copy", source_file, dest_path,
+                   "--rc", f"--rc-addr=127.0.0.1:{rc_port}", "--rc-no-auth"]
         bandwidth_limit = self.config.get("bandwidth_limit_mbps", 0)
         if bandwidth_limit > 0:
             command.extend(["--bwlimit", f"{bandwidth_limit}M"])
@@ -508,17 +541,26 @@ class SyncDaemon:
         self.log_event(EventType.DOWNLOAD, "download started", rule_id=rule_id, source_file=source_file, dest_path=dest_path)
 
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 command,
-                capture_output=True,
-                text=True,
-                timeout=60 * 60,
-                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
             )
-        except subprocess.TimeoutExpired:
-            self.update_download_state(rule_id, source_file, success=False, error="rclone timeout")
-            self.log_error(EventType.ERROR, "download timeout", rule_id=rule_id, source_file=source_file)
-            return
+            self._register_active_transfer(rule_id, source_file, process.pid, rc_port)
+
+            try:
+                stdout, stderr = process.communicate(timeout=60 * 60)
+                returncode = process.returncode
+            except subprocess.TimeoutExpired:
+                process.kill()
+                self._unregister_active_transfer(rule_id, source_file)
+                self.update_download_state(rule_id, source_file, success=False, error="rclone timeout")
+                self.log_error(EventType.ERROR, "download timeout", rule_id=rule_id, source_file=source_file)
+                return
+            finally:
+                self._unregister_active_transfer(rule_id, source_file)
+
         except OSError as exc:
             self.update_download_state(rule_id, source_file, success=False, error=str(exc))
             self.log_error(EventType.ERROR, "download process error", rule_id=rule_id, source_file=source_file, error=str(exc))
@@ -526,7 +568,7 @@ class SyncDaemon:
 
         duration = round(time.time() - start_time, 3)
 
-        if result.returncode == 0:
+        if returncode == 0:
             self.update_download_state(rule_id, source_file, success=True, error=None)
             self.log_event(
                 EventType.DOWNLOAD,
@@ -537,16 +579,16 @@ class SyncDaemon:
             )
             return
 
-        stderr = (result.stderr or "").strip()
-        stdout = (result.stdout or "").strip()
-        error_text = stderr if stderr else stdout
+        stderr_text = (stderr or "").strip()
+        stdout_text = (stdout or "").strip()
+        error_text = stderr_text if stderr_text else stdout_text
         self.update_download_state(rule_id, source_file, success=False, error=error_text)
         self.log_error(
             EventType.ERROR,
             "download failed",
             rule_id=rule_id,
             source_file=source_file,
-            returncode=result.returncode,
+            returncode=returncode,
             error=error_text,
         )
 

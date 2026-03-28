@@ -1,4 +1,5 @@
 __pycache__/
+web_panel
 CLAUDE.md
 config.json
 sync_daemon.service
