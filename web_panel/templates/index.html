@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sync Daemon 管理面板</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+</head>
+
+<body class="bg-gray-100">
+    <div class="container mx-auto p-6">
+        <h1 class="text-3xl font-bold mb-6">Sync Daemon 管理面板</h1>
+
+        <div class="mb-4 border-b border-gray-300">
+            <nav class="flex space-x-4">
+                <button onclick="showTab('config')" id="tab-config"
+                    class="px-4 py-2 font-medium border-b-2 border-blue-500">配置管理</button>
+                <button onclick="showTab('status')" id="tab-status" class="px-4 py-2 font-medium">状态监控</button>
+                <button onclick="showTab('progress')" id="tab-progress" class="px-4 py-2 font-medium">实时进度</button>
+                <button onclick="showTab('logs')" id="tab-logs" class="px-4 py-2 font-medium">日志查看</button>
+            </nav>
+        </div>
+
+        <div id="content-config" class="tab-content">
+            <div class="bg-white p-6 rounded shadow">
+                <h2 class="text-xl font-bold mb-4">配置管理</h2>
+                <div id="config-form"></div>
+                <button onclick="saveConfig()"
+                    class="mt-4 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">保存配置</button>
+                <div id="config-message" class="mt-4"></div>
+            </div>
+        </div>
+
+        <div id="content-status" class="tab-content hidden">
+            <div class="bg-white p-6 rounded shadow">
+                <h2 class="text-xl font-bold mb-4">状态监控</h2>
+                <div id="stats-cards" class="grid grid-cols-3 gap-4 mb-6"></div>
+                <div id="files-table"></div>
+            </div>
+        </div>
+
+        <div id="content-progress" class="tab-content hidden">
+            <div class="bg-white p-6 rounded shadow">
+                <h2 class="text-xl font-bold mb-4">实时进度</h2>
+                <div id="progress-list"></div>
+            </div>
+        </div>
+
+        <div id="content-logs" class="tab-content hidden">
+            <div class="bg-white p-6 rounded shadow">
+                <h2 class="text-xl font-bold mb-4">日志查看</h2>
+                <button onclick="loadLogs()"
+                    class="mb-4 px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">刷新日志</button>
+                <div id="logs-content"
+                    class="bg-gray-900 text-green-400 p-4 rounded font-mono text-sm h-96 overflow-y-auto"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let currentConfig = {};
+        let progressPollTimer = null;
+
+        async function apiFetch(url, options = {}) {
+            const requestOptions = {
+                ...options,
+                headers: { ...(options.headers || {}) }
+            };
+
+            let resp = await fetch(url, requestOptions);
+            if (resp.status === 401) {
+                let input = prompt("需要 API Key 认证，请输入 (不会写入 localStorage):", "");
+                if (input !== null) {
+                    const apiKey = input.trim();
+                    if (apiKey) {
+                        requestOptions.headers['X-API-Key'] = apiKey;
+                        resp = await fetch(url, requestOptions);
+                    }
+                }
+            }
+            return resp;
+        }
+
+        function showTab(tab) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+            document.querySelectorAll('nav button').forEach(el => el.classList.remove('border-blue-500'));
+            document.getElementById('content-' + tab).classList.remove('hidden');
+            document.getElementById('tab-' + tab).classList.add('border-blue-500');
+
+            // 离开实时进度 tab 时停止轮询
+            if (progressPollTimer !== null) {
+                clearInterval(progressPollTimer);
+                progressPollTimer = null;
+            }
+
+            if (tab === 'config') loadConfig();
+            if (tab === 'status') loadStatus();
+            if (tab === 'progress') {
+                loadProgress();
+                progressPollTimer = setInterval(loadProgress, 1000);
+            }
+            if (tab === 'logs') loadLogs();
+        }
+
+        async function loadConfig() {
+            try {
+                const resp = await apiFetch(`/api/config?_t=${Date.now()}`);
+                currentConfig = await resp.json();
+                if (currentConfig.error) {
+                    document.getElementById('config-message').innerHTML = `<div class="text-red-600">加载配置出错: ${currentConfig.error}</div>`;
+                }
+                renderConfigForm(currentConfig);
+            } catch (err) {
+                document.getElementById('config-message').innerHTML = `<div class="text-red-600">请求配置失败: ${err}</div>`;
+            }
+        }
+
+        function renderConfigForm(config) {
+            const form = document.getElementById('config-form');
+            form.innerHTML = `
+                <div class="space-y-4">
+                    <div><label class="block font-medium">扫描间隔（秒）</label>
+                    <input type="number" id="scan_interval_seconds" value="${config.scan_interval_seconds}" class="w-full border p-2 rounded"></div>
+                    <div><label class="block font-medium">刷新间隔（秒）</label>
+                    <input type="number" id="rclone_refresh_interval_seconds" value="${config.rclone_refresh_interval_seconds}" class="w-full border p-2 rounded"></div>
+                    <div><label class="block font-medium">最大并发下载数</label>
+                    <input type="number" id="max_concurrent_downloads" value="${config.max_concurrent_downloads}" class="w-full border p-2 rounded"></div>
+                    <div><label class="block font-medium">最大重试次数</label>
+                    <input type="number" id="max_retry_count" value="${config.max_retry_count}" class="w-full border p-2 rounded"></div>
+                    <div><label class="block font-medium">带宽限制（MB/s，0=无限制）</label>
+                    <input type="number" id="bandwidth_limit_mbps" value="${config.bandwidth_limit_mbps}" class="w-full border p-2 rounded"></div>
+                    <div><label class="block font-medium">rclone 命令</label>
+                    <input type="text" id="rclone_command" value="${config.rclone_command}" class="w-full border p-2 rounded"></div>
+                    <div><label class="block font-medium">rclone 服务名</label>
+                    <input type="text" id="rclone_service_name" value="${config.rclone_service_name}" class="w-full border p-2 rounded"></div>
+                    <div><label class="block font-medium">同步脚本 service 名 <span class="text-xs text-gray-500">（保存后自动 systemctl restart，留空则跳过）</span></label>
+                    <input type="text" id="sync_service_name" value="${config.sync_service_name || ''}" placeholder="例如：sync_daemon.service" class="w-full border p-2 rounded"></div>
+                    <div>
+                        <div class="flex items-center justify-between">
+                            <label class="block font-medium">同步规则</label>
+                            <button type="button" onclick="addRule()" class="px-3 py-1 text-sm bg-green-500 text-white rounded hover:bg-green-600">添加规则</button>
+                        </div>
+                        <div id="rules-list" class="space-y-2 mt-2"></div>
+                    </div>
+                </div>
+            `;
+            renderRules(config.rules || []);
+        }
+
+        function renderRules(rules) {
+            const list = document.getElementById('rules-list');
+            list.innerHTML = rules.map((rule, i) => `
+                <div class="border p-3 rounded">
+                    <div class="grid grid-cols-2 gap-2">
+                        <div><label class="text-sm">源路径</label><input type="text" id="rule_${i}_source" value="${rule.source_path}" class="w-full border p-1 rounded text-sm"></div>
+                        <div><label class="text-sm">目标路径</label><input type="text" id="rule_${i}_dest" value="${rule.dest_path}" class="w-full border p-1 rounded text-sm"></div>
+                    </div>
+                    <div class="flex items-end justify-between mt-2">
+                        <label class="inline-flex items-center"><input type="checkbox" id="rule_${i}_enabled" ${rule.enabled ? 'checked' : ''} class="mr-2">启用</label>
+                        <button type="button" onclick="deleteRule(${i})" class="px-3 py-1 text-sm bg-red-500 text-white rounded hover:bg-red-600">删除</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function saveConfig() {
+            // Spread original config first to preserve any extra fields (e.g. _comment)
+            const newConfig = {
+                ...currentConfig,
+                scan_interval_seconds: parseInt(document.getElementById('scan_interval_seconds').value),
+                rclone_refresh_interval_seconds: parseInt(document.getElementById('rclone_refresh_interval_seconds').value),
+                max_concurrent_downloads: parseInt(document.getElementById('max_concurrent_downloads').value),
+                max_retry_count: parseInt(document.getElementById('max_retry_count').value),
+                bandwidth_limit_mbps: parseFloat(document.getElementById('bandwidth_limit_mbps').value),
+                rclone_command: document.getElementById('rclone_command').value,
+                rclone_service_name: document.getElementById('rclone_service_name').value,
+                sync_service_name: document.getElementById('sync_service_name').value,
+                rules: (currentConfig.rules || []).map((rule, i) => ({
+                    ...rule,
+                    source_path: document.getElementById(`rule_${i}_source`).value,
+                    dest_path: document.getElementById(`rule_${i}_dest`).value,
+                    enabled: document.getElementById(`rule_${i}_enabled`).checked
+                }))
+            };
+
+            const resp = await apiFetch('/api/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(newConfig)
+            });
+            const result = await resp.json();
+            document.getElementById('config-message').innerHTML = result.error ?
+                `<div class="text-red-600">${result.error}</div>` :
+                `<div class="text-green-600">${result.message}</div>`;
+        }
+
+        async function addRule() {
+            const sourcePathInput = prompt('请输入 source_path（源路径）:');
+            if (sourcePathInput === null) return;
+            const sourcePath = sourcePathInput.trim();
+            if (!sourcePath) {
+                document.getElementById('config-message').innerHTML = `<div class="text-red-600">source_path 不能为空</div>`;
+                return;
+            }
+
+            const destPathInput = prompt('请输入 dest_path（目标路径）:');
+            if (destPathInput === null) return;
+            const destPath = destPathInput.trim();
+            if (!destPath) {
+                document.getElementById('config-message').innerHTML = `<div class="text-red-600">dest_path 不能为空</div>`;
+                return;
+            }
+
+            const resp = await apiFetch('/api/config/rules', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    source_path: sourcePath,
+                    dest_path: destPath
+                })
+            });
+            const result = await resp.json();
+            if (result.error) {
+                document.getElementById('config-message').innerHTML = `<div class="text-red-600">${result.error}</div>`;
+                return;
+            }
+
+            document.getElementById('config-message').innerHTML = `<div class="text-green-600">${result.message}</div>`;
+            await loadConfig();
+        }
+
+        async function deleteRule(ruleIndex) {
+            const confirmed = confirm('确认删除这条规则吗？');
+            if (!confirmed) return;
+
+            const resp = await apiFetch(`/api/config/rules/${ruleIndex}`, {
+                method: 'DELETE'
+            });
+            const result = await resp.json();
+            if (result.error) {
+                document.getElementById('config-message').innerHTML = `<div class="text-red-600">${result.error}</div>`;
+                return;
+            }
+
+            document.getElementById('config-message').innerHTML = `<div class="text-green-600">${result.message}</div>`;
+            await loadConfig();
+        }
+
+        let currentState = null;
+        let currentFolderFilter = 'all';
+        let currentPage = 1;
+        const PAGE_SIZE = 30;
+
+        async function loadStatus() {
+            const [statsResp, stateResp] = await Promise.all([
+                apiFetch(`/api/stats?_t=${Date.now()}`),
+                apiFetch(`/api/state?_t=${Date.now()}`)
+            ]);
+            const stats = await statsResp.json();
+            currentState = await stateResp.json();
+
+            document.getElementById('stats-cards').innerHTML = `
+                <div class="bg-blue-100 p-4 rounded"><div class="text-2xl font-bold">${stats.total}</div><div class="text-sm">总文件数</div></div>
+                <div class="bg-green-100 p-4 rounded"><div class="text-2xl font-bold">${stats.synced}</div><div class="text-sm">已同步</div></div>
+                <div class="bg-yellow-100 p-4 rounded"><div class="text-2xl font-bold">${stats.pending}</div><div class="text-sm">待同步</div></div>
+                <div class="bg-red-100 p-4 rounded"><div class="text-2xl font-bold">${stats.failed}</div><div class="text-sm">失败</div></div>
+                <div class="bg-gray-100 p-4 rounded"><div class="text-2xl font-bold">${stats.baseline}</div><div class="text-sm">基线</div></div>
+                <div class="bg-purple-100 p-4 rounded"><div class="text-2xl font-bold">${stats.permanent_failed}</div><div class="text-sm">永久失败</div></div>
+            `;
+
+            renderFilesTable();
+        }
+
+        function renderFilesTable() {
+            if (!currentState) return;
+
+            let files = [];
+            let folderOptionsHTML = `<option value="all" ${currentFolderFilter === 'all' ? 'selected' : ''}>所有文件夹</option>`;
+
+            for (const [ruleId, ruleData] of Object.entries(currentState.rules || {})) {
+                folderOptionsHTML += `<option value="${ruleId}" ${currentFolderFilter === ruleId ? 'selected' : ''}>${ruleData.source_path}</option>`;
+                if (currentFolderFilter === 'all' || currentFolderFilter === ruleId) {
+                    for (const [path, info] of Object.entries(ruleData.files || {})) {
+                        files.push({ path, ...info });
+                    }
+                }
+            }
+
+            const totalPages = Math.max(1, Math.ceil(files.length / PAGE_SIZE));
+            if (currentPage > totalPages) currentPage = totalPages;
+            const pageFiles = files.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+
+            const pagerHTML = `
+                <div class="flex items-center gap-2 mt-3">
+                    <button onclick="changePage(-1)" class="px-3 py-1 border rounded hover:bg-gray-100 disabled:opacity-40" ${currentPage <= 1 ? 'disabled' : ''}>上一页</button>
+                    <span class="text-sm text-gray-600">第 ${currentPage} / ${totalPages} 页（共 ${files.length} 条）</span>
+                    <button onclick="changePage(1)" class="px-3 py-1 border rounded hover:bg-gray-100 disabled:opacity-40" ${currentPage >= totalPages ? 'disabled' : ''}>下一页</button>
+                </div>
+            `;
+
+            document.getElementById('files-table').innerHTML = `
+                <div class="mb-4">
+                    <select onchange="currentFolderFilter=this.value; currentPage=1; renderFilesTable()" class="border p-2 rounded max-w-full">
+                        ${folderOptionsHTML}
+                    </select>
+                </div>
+                <div class="overflow-x-auto"><table class="w-full text-sm">
+                    <thead class="bg-gray-200"><tr>
+                        <th class="p-2 text-left">文件路径</th>
+                        <th class="p-2 text-left">状态</th>
+                        <th class="p-2 text-left">重试次数</th>
+                        <th class="p-2 text-left">最后错误</th>
+                    </tr></thead>
+                    <tbody>${pageFiles.map(f => `
+                        <tr class="border-b">
+                            <td class="p-2 truncate max-w-xs">${f.path}</td>
+                            <td class="p-2"><span class="px-2 py-1 rounded text-xs ${getStatusColor(f.status)}">${f.status}</span></td>
+                            <td class="p-2">${f.retry_count || 0}</td>
+                            <td class="p-2 truncate max-w-xs">${f.last_error || '-'}</td>
+                        </tr>
+                    `).join('')}</tbody>
+                </table></div>
+                ${pagerHTML}
+            `;
+        }
+
+        function changePage(delta) {
+            currentPage += delta;
+            renderFilesTable();
+        }
+
+        function getStatusColor(status) {
+            const colors = {
+                synced: 'bg-green-200 text-green-800',
+                pending: 'bg-yellow-200 text-yellow-800',
+                failed: 'bg-red-200 text-red-800',
+                baseline: 'bg-gray-200 text-gray-800',
+                permanent_failed: 'bg-purple-200 text-purple-800'
+            };
+            return colors[status] || 'bg-gray-200';
+        }
+
+        function renderProgress(data) {
+            const list = document.getElementById('progress-list');
+            if (Object.keys(data).length === 0) {
+                list.innerHTML = '<div class="text-gray-500 text-center py-8">暂无下载任务</div>';
+                return;
+            }
+
+            list.innerHTML = Object.entries(data).map(([key, item]) => {
+                const progress = item.progress;
+                if (progress.connecting) {
+                    return `
+                        <div class="border p-4 rounded mb-4">
+                            <div class="font-medium mb-2">${progress.current_file || item.transfer_info.source_file}</div>
+                            <div class="w-full bg-gray-200 rounded h-4 mb-1 relative overflow-hidden">
+                                <div class="bg-blue-300 h-4 rounded animate-pulse" style="width: 100%"></div>
+                            </div>
+                            <div class="text-sm text-yellow-600">连接 rclone 中…</div>
+                        </div>
+                    `;
+                }
+                // Use at least 5% width so the bar is always visible
+                const barWidth = Math.max(progress.percentage, progress.percentage > 0 ? 5 : 0);
+                return `
+                    <div class="border p-4 rounded mb-4">
+                        <div class="font-medium mb-2">${progress.current_file || item.transfer_info.source_file}</div>
+                        <div class="w-full bg-gray-200 rounded h-4 mb-1 relative">
+                            <div class="bg-blue-500 h-4 rounded transition-all" style="width: ${barWidth}%"></div>
+                        </div>
+                        <div class="text-sm text-gray-700 mb-1">${progress.percentage}% &nbsp;|&nbsp; 速度: ${progress.speedMBps} MB/s &nbsp;|&nbsp; 剩余: ${progress.eta != null ? Math.round(progress.eta) + 's' : '计算中'}</div>
+                        <div class="text-xs text-gray-500">${progress.bytes ? (progress.bytes / 1024 / 1024).toFixed(1) + ' MB' : '0 MB'} / ${progress.totalBytes ? (progress.totalBytes / 1024 / 1024).toFixed(1) + ' MB' : '未知'}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        socket.on('progress_update', renderProgress);
+
+        async function loadProgress() {
+            try {
+                const resp = await apiFetch(`/api/progress?_t=${Date.now()}`);
+                const data = await resp.json();
+                renderProgress(data);
+            } catch (err) {
+                console.error("加载实时进度失败", err);
+            }
+        }
+
+        async function loadLogs() {
+            const resp = await apiFetch(`/api/logs?lines=200&_t=${Date.now()}`);
+            const data = await resp.json();
+            document.getElementById('logs-content').innerHTML = data.logs.join('');
+        }
+
+        window.onload = () => loadConfig();
+    </script>
+</body>
+
+</html>
