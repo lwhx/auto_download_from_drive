@@ -2,6 +2,8 @@ __pycache__/
 CLAUDE.md
 config.json
 sync_daemon.service
+.DS_Store
+.claude
 
 # Runtime files
 sync_state.json*
