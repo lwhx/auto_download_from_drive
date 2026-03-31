@@ -184,6 +184,18 @@
         let progressPollTimer = null;
 
         let authPromise = null;
+        let csrfToken = '';
+        const UNSAFE_HTTP_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+        function isUnsafeMethod(method) {
+            return UNSAFE_HTTP_METHODS.has(String(method || 'GET').toUpperCase());
+        }
+
+        function updateCsrfToken(payload) {
+            if (payload && typeof payload.csrf_token === 'string' && payload.csrf_token) {
+                csrfToken = payload.csrf_token;
+            }
+        }
 
         async function ensureAuth() {
             if (authPromise) {
@@ -194,6 +206,7 @@
                 try {
                     const checkResp = await fetch('/api/auth', { method: 'POST' });
                     if (checkResp.ok) {
+                        updateCsrfToken(await checkResp.json());
                         if (!socket.connected) {
                             socket.connect();
                         }
@@ -221,6 +234,7 @@
                     if (!authResp.ok) {
                         return false;
                     }
+                    updateCsrfToken(await authResp.json());
                     if (!socket.connected) {
                         socket.connect();
                     }
@@ -241,13 +255,25 @@
         async function apiFetch(url, options = {}) {
             const requestOptions = {
                 ...options,
+                method: String(options.method || 'GET').toUpperCase(),
                 headers: { ...(options.headers || {}) }
             };
+            const unsafeMethod = isUnsafeMethod(requestOptions.method);
+
+            if (unsafeMethod && !csrfToken) {
+                await ensureAuth();
+            }
+            if (unsafeMethod && csrfToken) {
+                requestOptions.headers['X-CSRF-Token'] = csrfToken;
+            }
 
             let resp = await fetch(url, requestOptions);
-            if (resp.status === 401) {
+            if (resp.status === 401 || (unsafeMethod && resp.status === 403)) {
                 const authed = await ensureAuth();
                 if (authed) {
+                    if (unsafeMethod && csrfToken) {
+                        requestOptions.headers['X-CSRF-Token'] = csrfToken;
+                    }
                     resp = await fetch(url, requestOptions);
                 }
             }

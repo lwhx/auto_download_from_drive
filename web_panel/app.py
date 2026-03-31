@@ -6,6 +6,7 @@ from flask_socketio import SocketIO
 from flask_cors import CORS
 import json
 import os
+import secrets
 import threading
 import subprocess
 import time
@@ -13,6 +14,7 @@ import logging
 import hmac
 from functools import wraps
 from datetime import datetime
+from urllib.parse import urlparse
 from rclone_monitor import get_all_transfers_progress
 
 # ==================== Configuration ====================
@@ -50,36 +52,105 @@ logger = logging.getLogger('web_panel')
 cors_origins = [o.strip() for o in ALLOWED_ORIGINS.split(',')]
 CORS(app, resources={r"/api/*": {"origins": cors_origins}})
 socketio = SocketIO(app, cors_allowed_origins=cors_origins)
+UNSAFE_HTTP_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
+CSRF_SESSION_KEY = 'csrf_token'
 
 # ==================== Authentication ====================
 def _has_valid_session():
     expires_at = session.get('api_auth_until', 0)
     return isinstance(expires_at, int) and expires_at > int(time.time())
 
+def _refresh_authenticated_session(reissue_csrf=False):
+    session['api_auth_until'] = int(time.time()) + SESSION_TTL_SECONDS
+    csrf_token = session.get(CSRF_SESSION_KEY, '')
+    if reissue_csrf or not isinstance(csrf_token, str) or not csrf_token:
+        csrf_token = secrets.token_urlsafe(32)
+        session[CSRF_SESSION_KEY] = csrf_token
+    return csrf_token
+
+def _normalize_origin(origin):
+    value = (origin or '').strip()
+    if not value:
+        return None
+
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f'{parsed.scheme.lower()}://{parsed.netloc.lower()}'
+
+def _extract_request_origin():
+    origin = _normalize_origin(request.headers.get('Origin', ''))
+    if origin:
+        return origin
+
+    referer = request.headers.get('Referer', '')
+    return _normalize_origin(referer)
+
+def _allowed_request_origins():
+    allowed = {_normalize_origin(origin) for origin in cors_origins}
+    allowed.add(_normalize_origin(request.host_url))
+    return {origin for origin in allowed if origin}
+
+def _validate_session_csrf():
+    request_origin = _extract_request_origin()
+    if not request_origin or request_origin not in _allowed_request_origins():
+        logger.warning(
+            'Blocked unsafe session request with invalid origin from %s: %s %s origin=%s referer=%s',
+            request.remote_addr,
+            request.method,
+            request.path,
+            request.headers.get('Origin', ''),
+            request.headers.get('Referer', '')
+        )
+        return False, (jsonify({'error': 'Forbidden - invalid request origin'}), 403)
+
+    expected_token = session.get(CSRF_SESSION_KEY, '')
+    provided_token = request.headers.get('X-CSRF-Token', '')
+    if (
+        not isinstance(expected_token, str) or
+        not expected_token or
+        not isinstance(provided_token, str) or
+        not provided_token or
+        not hmac.compare_digest(provided_token, expected_token)
+    ):
+        logger.warning(
+            'Blocked unsafe session request with invalid CSRF token from %s: %s %s',
+            request.remote_addr,
+            request.method,
+            request.path
+        )
+        return False, (jsonify({'error': 'Forbidden - invalid CSRF token'}), 403)
+
+    return True, None
+
 def _require_api_key_or_session():
     if _has_valid_session():
         # Sliding expiration to reduce frequent re-auth prompts.
-        session['api_auth_until'] = int(time.time()) + SESSION_TTL_SECONDS
-        return True, None
+        csrf_token = _refresh_authenticated_session()
+        return {'auth_via': 'session', 'csrf_token': csrf_token}, None
 
     api_key = request.headers.get('X-API-Key', '')
     if not api_key or not hmac.compare_digest(api_key, API_KEY):
         logger.warning(f'Unauthorized API access attempt from {request.remote_addr}')
-        return False, (jsonify({'error': 'Unauthorized - Invalid or missing API key'}), 401)
+        return None, (jsonify({'error': 'Unauthorized - Invalid or missing API key'}), 401)
 
     # Promote a valid API key auth to short-lived HttpOnly session.
-    session['api_auth_until'] = int(time.time()) + SESSION_TTL_SECONDS
+    csrf_token = _refresh_authenticated_session(reissue_csrf=True)
     logger.info(f'API request from {request.remote_addr}: {request.method} {request.path}')
-    return True, None
+    return {'auth_via': 'api_key', 'csrf_token': csrf_token}, None
 
 
 def require_api_key(f):
     """Decorator to require API Key authentication for protected routes."""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        ok, error = _require_api_key_or_session()
-        if not ok:
+        auth_context, error = _require_api_key_or_session()
+        if error:
             return error
+        if request.method in UNSAFE_HTTP_METHODS and auth_context['auth_via'] == 'session':
+            ok, csrf_error = _validate_session_csrf()
+            if not ok:
+                return csrf_error
         return f(*args, **kwargs)
     
     return decorated_function
@@ -157,10 +228,10 @@ def index():
 
 @app.route('/api/auth', methods=['POST'])
 def auth():
-    ok, error = _require_api_key_or_session()
-    if not ok:
+    auth_context, error = _require_api_key_or_session()
+    if error:
         return error
-    return jsonify({'success': True})
+    return jsonify({'success': True, 'csrf_token': auth_context['csrf_token']})
 
 @app.route('/api/config', methods=['GET'])
 @require_api_key
