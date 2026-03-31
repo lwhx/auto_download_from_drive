@@ -49,29 +49,34 @@ def _has_valid_session():
     expires_at = session.get('api_auth_until', 0)
     return isinstance(expires_at, int) and expires_at > int(time.time())
 
+def _require_api_key_or_session():
+    if not API_KEY:
+        logger.warning('API_KEY not set - authentication disabled (development mode)')
+        return True, None
+
+    if _has_valid_session():
+        # Sliding expiration to reduce frequent re-auth prompts.
+        session['api_auth_until'] = int(time.time()) + SESSION_TTL_SECONDS
+        return True, None
+
+    api_key = request.headers.get('X-API-Key', '')
+    if not api_key or not hmac.compare_digest(api_key, API_KEY):
+        logger.warning(f'Unauthorized API access attempt from {request.remote_addr}')
+        return False, (jsonify({'error': 'Unauthorized - Invalid or missing API key'}), 401)
+
+    # Promote a valid API key auth to short-lived HttpOnly session.
+    session['api_auth_until'] = int(time.time()) + SESSION_TTL_SECONDS
+    logger.info(f'API request from {request.remote_addr}: {request.method} {request.path}')
+    return True, None
+
 
 def require_api_key(f):
     """Decorator to require API Key authentication for protected routes."""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not API_KEY:
-            # API Key not configured - allow access (development mode)
-            logger.warning('API_KEY not set - authentication disabled (development mode)')
-            return f(*args, **kwargs)
-        
-        if _has_valid_session():
-            # Sliding expiration to reduce frequent re-auth prompts.
-            session['api_auth_until'] = int(time.time()) + SESSION_TTL_SECONDS
-            return f(*args, **kwargs)
-
-        api_key = request.headers.get('X-API-Key', '')
-        if not api_key or not hmac.compare_digest(api_key, API_KEY):
-            logger.warning(f'Unauthorized API access attempt from {request.remote_addr}')
-            return jsonify({'error': 'Unauthorized - Invalid or missing API key'}), 401
-
-        # Promote a valid API key auth to short-lived HttpOnly session.
-        session['api_auth_until'] = int(time.time()) + SESSION_TTL_SECONDS
-        logger.info(f'API request from {request.remote_addr}: {request.method} {request.path}')
+        ok, error = _require_api_key_or_session()
+        if not ok:
+            return error
         return f(*args, **kwargs)
     
     return decorated_function
@@ -127,6 +132,13 @@ def _run_systemctl(action, service_name, timeout=15):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/api/auth', methods=['POST'])
+def auth():
+    ok, error = _require_api_key_or_session()
+    if not ok:
+        return error
+    return jsonify({'success': True})
 
 @app.route('/api/config', methods=['GET'])
 @require_api_key
@@ -314,11 +326,18 @@ socketio.start_background_task(background_progress_monitor)
 
 @socketio.on('connect')
 def handle_connect():
-    print('Client connected')
+    if API_KEY and not _has_valid_session():
+        logger.warning(f'Unauthenticated SocketIO connection rejected from {request.remote_addr}')
+        return False
+    logger.info(f'SocketIO client connected: {request.remote_addr}')
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print('Client disconnected')
+    try:
+        addr = request.remote_addr
+    except RuntimeError:
+        addr = 'unknown'
+    logger.info(f'SocketIO client disconnected: {addr}')
 
 if __name__ == '__main__':
     

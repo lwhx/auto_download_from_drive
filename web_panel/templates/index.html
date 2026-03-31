@@ -179,7 +179,7 @@
         </section>
     </div>
     <script>
-        const socket = io();
+        const socket = io({ autoConnect: false });
         let currentConfig = {};
         let progressPollTimer = null;
 
@@ -196,6 +196,13 @@
                     const apiKey = input.trim();
                     if (apiKey) {
                         requestOptions.headers['X-API-Key'] = apiKey;
+                        await fetch('/api/auth', {
+                            method: 'POST',
+                            headers: { 'X-API-Key': apiKey }
+                        });
+                        if (!socket.connected) {
+                            socket.connect();
+                        }
                         resp = await fetch(url, requestOptions);
                     }
                 }
@@ -529,7 +536,40 @@
             document.getElementById('logs-content').innerHTML = data.logs.join('');
         }
 
-        window.onload = () => showTab('config');
+        async function ensureAuthThenConnect() {
+            try {
+                const resp = await fetch('/api/auth', { method: 'POST' });
+                if (resp.ok) {
+                    socket.connect();
+                    return;
+                }
+            } catch (err) {
+                console.error('认证检查失败', err);
+            }
+
+            let input = prompt("需要 API Key 认证，请输入 (不会写入 localStorage):", "");
+            if (input !== null) {
+                const apiKey = input.trim();
+                if (apiKey) {
+                    try {
+                        const authResp = await fetch('/api/auth', {
+                            method: 'POST',
+                            headers: { 'X-API-Key': apiKey }
+                        });
+                        if (authResp.ok) {
+                            socket.connect();
+                        }
+                    } catch (err) {
+                        console.error('认证失败', err);
+                    }
+                }
+            }
+        }
+
+        window.onload = () => {
+            showTab('config');
+            ensureAuthThenConnect();
+        };
     </script>
 </body>
 
