@@ -5,6 +5,7 @@ sync_daemon.service
 .DS_Store
 .claude
 instruction.md
+web_panel/SECURITY_REVIEW.md
 
 # Runtime files
 sync_state.json*

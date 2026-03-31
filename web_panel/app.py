@@ -19,13 +19,20 @@ from rclone_monitor import get_all_transfers_progress
 app = Flask(__name__)
 
 # Load environment variables for authentication and CORS
-API_KEY = os.getenv('WEB_PANEL_API_KEY', '')
+API_KEY = os.getenv('WEB_PANEL_API_KEY', '').strip()
 ALLOWED_ORIGINS = os.getenv('WEB_PANEL_ALLOWED_ORIGINS', 'http://localhost,https://localhost')
 LOG_LEVEL = os.getenv('WEB_PANEL_LOG_LEVEL', 'INFO').upper()
 SESSION_TTL_SECONDS = int(os.getenv('WEB_PANEL_SESSION_TTL_SECONDS', '1800'))
-SECRET_KEY = os.getenv('WEB_PANEL_SECRET_KEY', '')
+SECRET_KEY = os.getenv('WEB_PANEL_SECRET_KEY', '').strip()
+
+missing_required_settings = []
+if not API_KEY:
+    missing_required_settings.append('WEB_PANEL_API_KEY')
 if not SECRET_KEY:
-    SECRET_KEY = os.urandom(32).hex()
+    missing_required_settings.append('WEB_PANEL_SECRET_KEY')
+if missing_required_settings:
+    missing_list = ', '.join(missing_required_settings)
+    raise RuntimeError(f'Missing required environment variables: {missing_list}')
 
 app.config['SECRET_KEY'] = SECRET_KEY
 app.config['SESSION_COOKIE_HTTPONLY'] = True
@@ -50,10 +57,6 @@ def _has_valid_session():
     return isinstance(expires_at, int) and expires_at > int(time.time())
 
 def _require_api_key_or_session():
-    if not API_KEY:
-        logger.warning('API_KEY not set - authentication disabled (development mode)')
-        return True, None
-
     if _has_valid_session():
         # Sliding expiration to reduce frequent re-auth prompts.
         session['api_auth_until'] = int(time.time()) + SESSION_TTL_SECONDS
@@ -342,10 +345,7 @@ def handle_disconnect():
 if __name__ == '__main__':
     
     # Log startup information
-    if API_KEY:
-        logger.info('Web panel starting with API authentication enabled')
-    else:
-        logger.warning('Web panel starting WITHOUT API authentication (development mode)')
+    logger.info('Web panel starting with required API authentication enabled')
     logger.info(f'Listening on 127.0.0.1:5000 (local only)')
     logger.info(f'Allowed CORS origins: {", ".join(cors_origins)}')
     
