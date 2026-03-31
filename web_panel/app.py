@@ -4,6 +4,7 @@ monkey.patch_all()
 from flask import Flask, render_template, jsonify, request, session
 from flask_socketio import SocketIO
 from flask_cors import CORS
+from werkzeug.middleware.proxy_fix import ProxyFix
 import json
 import os
 import secrets
@@ -19,6 +20,8 @@ from rclone_monitor import get_all_transfers_progress
 
 # ==================== Configuration ====================
 app = Flask(__name__)
+# Trust exactly 1 upstream proxy (Nginx) so request.remote_addr reflects the real client IP.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 # Load environment variables for authentication and CORS
 API_KEY = os.getenv('WEB_PANEL_API_KEY', '').strip()
@@ -54,6 +57,59 @@ CORS(app, resources={r"/api/*": {"origins": cors_origins}})
 socketio = SocketIO(app, cors_allowed_origins=cors_origins)
 UNSAFE_HTTP_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
 CSRF_SESSION_KEY = 'csrf_token'
+
+# ==================== Brute-force protection ====================
+AUTH_RATE_LIMIT_MAX_FAILURES    = int(os.getenv('WEB_PANEL_AUTH_MAX_FAILURES', '10'))
+AUTH_RATE_LIMIT_WINDOW_SECONDS  = int(os.getenv('WEB_PANEL_AUTH_WINDOW_SECONDS', '600'))
+AUTH_RATE_LIMIT_LOCKOUT_SECONDS = int(os.getenv('WEB_PANEL_AUTH_LOCKOUT_SECONDS', '900'))
+AUTH_RATE_LIMIT_CLEANUP_INTERVAL = int(os.getenv('WEB_PANEL_AUTH_CLEANUP_INTERVAL', '300'))
+
+# ip -> {'count': int, 'window_start': float, 'locked_until': float}
+_auth_failures: dict = {}
+_auth_failures_lock = threading.Lock()
+_auth_last_cleanup: float = 0.0
+
+
+def _auth_cleanup_if_needed(now: float) -> None:
+    """Remove stale entries from _auth_failures. Must be called under _auth_failures_lock."""
+    global _auth_last_cleanup
+    if now - _auth_last_cleanup < AUTH_RATE_LIMIT_CLEANUP_INTERVAL:
+        return
+    _auth_last_cleanup = now
+    stale = [
+        ip for ip, e in _auth_failures.items()
+        if e['locked_until'] <= now and e['window_start'] + AUTH_RATE_LIMIT_WINDOW_SECONDS <= now
+    ]
+    for ip in stale:
+        del _auth_failures[ip]
+
+
+def _is_ip_rate_limited(ip: str, now: float) -> bool:
+    with _auth_failures_lock:
+        entry = _auth_failures.get(ip)
+        return entry is not None and entry['locked_until'] > now
+
+
+def _record_auth_failure(ip: str, now: float) -> None:
+    with _auth_failures_lock:
+        _auth_cleanup_if_needed(now)
+        entry = _auth_failures.get(ip)
+        if entry is None or now - entry['window_start'] > AUTH_RATE_LIMIT_WINDOW_SECONDS:
+            _auth_failures[ip] = {'count': 1, 'window_start': now, 'locked_until': 0.0}
+        else:
+            entry['count'] += 1
+            if entry['count'] >= AUTH_RATE_LIMIT_MAX_FAILURES:
+                entry['locked_until'] = now + AUTH_RATE_LIMIT_LOCKOUT_SECONDS
+                logger.warning(
+                    'Auth lockout triggered for %s after %d failures; locked for %ds',
+                    ip, entry['count'], AUTH_RATE_LIMIT_LOCKOUT_SECONDS
+                )
+
+
+def _clear_auth_failures(ip: str) -> None:
+    with _auth_failures_lock:
+        _auth_failures.pop(ip, None)
+
 
 # ==================== Authentication ====================
 def _has_valid_session():
@@ -129,11 +185,20 @@ def _require_api_key_or_session():
         csrf_token = _refresh_authenticated_session()
         return {'auth_via': 'session', 'csrf_token': csrf_token}, None
 
+    ip = request.remote_addr
+    now = time.time()
+
+    if _is_ip_rate_limited(ip, now):
+        logger.warning('Rate-limited auth attempt from %s', ip)
+        return None, (jsonify({'error': 'Too many failed attempts. Try again later.'}), 429)
+
     api_key = request.headers.get('X-API-Key', '')
     if not api_key or not hmac.compare_digest(api_key, API_KEY):
+        _record_auth_failure(ip, now)
         logger.warning(f'Unauthorized API access attempt from {request.remote_addr}')
         return None, (jsonify({'error': 'Unauthorized - Invalid or missing API key'}), 401)
 
+    _clear_auth_failures(ip)
     # Promote a valid API key auth to short-lived HttpOnly session.
     csrf_token = _refresh_authenticated_session(reissue_csrf=True)
     logger.info(f'API request from {request.remote_addr}: {request.method} {request.path}')

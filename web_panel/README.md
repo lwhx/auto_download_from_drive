@@ -112,6 +112,11 @@ WEB_PANEL_ALLOWED_ORIGINS=https://your-domain.com
 WEB_PANEL_LOG_LEVEL=INFO
 WEB_PANEL_SECRET_KEY=用于签发 session 的随机字符串
 WEB_PANEL_SESSION_TTL_SECONDS=1800
+# 暴力破解防护（可选，以下为默认值）
+WEB_PANEL_AUTH_MAX_FAILURES=10
+WEB_PANEL_AUTH_WINDOW_SECONDS=600
+WEB_PANEL_AUTH_LOCKOUT_SECONDS=900
+WEB_PANEL_AUTH_CLEANUP_INTERVAL=300
 ```
 
 说明：
@@ -124,8 +129,11 @@ WEB_PANEL_SESSION_TTL_SECONDS=1800
   `https://your-domain.com,https://sub.your-domain.com`。  
   仅这些 Origin 可以访问 `/api/*` 和 Socket.IO。
 
-- `WEB_PANEL_SECRET_KEY` / `WEB_PANEL_SESSION_TTL_SECONDS`  
+- `WEB_PANEL_SECRET_KEY` / `WEB_PANEL_SESSION_TTL_SECONDS`
   用于 Flask session 加密及登录状态有效期（滑动过期），成功认证一次后会在浏览器内通过 HttpOnly + Secure Cookie 维持登陆。
+
+- `WEB_PANEL_AUTH_MAX_FAILURES` / `WEB_PANEL_AUTH_WINDOW_SECONDS` / `WEB_PANEL_AUTH_LOCKOUT_SECONDS` / `WEB_PANEL_AUTH_CLEANUP_INTERVAL`
+  认证端点暴力破解防护参数。默认：10 次失败（10 分钟窗口内）触发封禁，封禁时长 15 分钟；成功认证后计数重置。建议同时在 Nginx 层配置 `limit_req_zone`（见 1.6 节）作为纵深防御。
 
 建议限制权限：
 
@@ -174,6 +182,9 @@ systemctl status web-panel.service
 示例 server 配置（请替换你的域名与证书路径）：
 
 ```nginx
+# 暴力破解保护：/api/auth 每 IP 每分钟最多 5 次，超出返回 429
+limit_req_zone $binary_remote_addr zone=auth_limit:10m rate=5r/m;
+
 server {
     listen 80;
     server_name your-domain.com;
@@ -186,6 +197,18 @@ server {
 
     ssl_certificate     /etc/letsencrypt/live/your-domain.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
+
+    # 认证端点单独限速（纵深防御；Flask 层也有独立限速逻辑）
+    location = /api/auth {
+        limit_req zone=auth_limit burst=3 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://127.0.0.1:5000/api/auth;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
 
     # 静态页面 + 普通 HTTP API
     location / {
