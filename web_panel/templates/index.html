@@ -183,6 +183,61 @@
         let currentConfig = {};
         let progressPollTimer = null;
 
+        let authPromise = null;
+
+        async function ensureAuth() {
+            if (authPromise) {
+                return authPromise;
+            }
+
+            authPromise = (async () => {
+                try {
+                    const checkResp = await fetch('/api/auth', { method: 'POST' });
+                    if (checkResp.ok) {
+                        if (!socket.connected) {
+                            socket.connect();
+                        }
+                        return true;
+                    }
+                } catch (err) {
+                    console.error('认证检查失败', err);
+                }
+
+                const input = prompt("需要 API Key 认证，请输入 (不会写入 localStorage):", "");
+                if (input === null) {
+                    return false;
+                }
+
+                const apiKey = input.trim();
+                if (!apiKey) {
+                    return false;
+                }
+
+                try {
+                    const authResp = await fetch('/api/auth', {
+                        method: 'POST',
+                        headers: { 'X-API-Key': apiKey }
+                    });
+                    if (!authResp.ok) {
+                        return false;
+                    }
+                    if (!socket.connected) {
+                        socket.connect();
+                    }
+                    return true;
+                } catch (err) {
+                    console.error('认证失败', err);
+                    return false;
+                }
+            })();
+
+            try {
+                return await authPromise;
+            } finally {
+                authPromise = null;
+            }
+        }
+
         async function apiFetch(url, options = {}) {
             const requestOptions = {
                 ...options,
@@ -191,20 +246,9 @@
 
             let resp = await fetch(url, requestOptions);
             if (resp.status === 401) {
-                let input = prompt("需要 API Key 认证，请输入 (不会写入 localStorage):", "");
-                if (input !== null) {
-                    const apiKey = input.trim();
-                    if (apiKey) {
-                        requestOptions.headers['X-API-Key'] = apiKey;
-                        await fetch('/api/auth', {
-                            method: 'POST',
-                            headers: { 'X-API-Key': apiKey }
-                        });
-                        if (!socket.connected) {
-                            socket.connect();
-                        }
-                        resp = await fetch(url, requestOptions);
-                    }
+                const authed = await ensureAuth();
+                if (authed) {
+                    resp = await fetch(url, requestOptions);
                 }
             }
             return resp;
@@ -536,39 +580,9 @@
             document.getElementById('logs-content').innerHTML = data.logs.join('');
         }
 
-        async function ensureAuthThenConnect() {
-            try {
-                const resp = await fetch('/api/auth', { method: 'POST' });
-                if (resp.ok) {
-                    socket.connect();
-                    return;
-                }
-            } catch (err) {
-                console.error('认证检查失败', err);
-            }
-
-            let input = prompt("需要 API Key 认证，请输入 (不会写入 localStorage):", "");
-            if (input !== null) {
-                const apiKey = input.trim();
-                if (apiKey) {
-                    try {
-                        const authResp = await fetch('/api/auth', {
-                            method: 'POST',
-                            headers: { 'X-API-Key': apiKey }
-                        });
-                        if (authResp.ok) {
-                            socket.connect();
-                        }
-                    } catch (err) {
-                        console.error('认证失败', err);
-                    }
-                }
-            }
-        }
-
         window.onload = () => {
             showTab('config');
-            ensureAuthThenConnect();
+            ensureAuth();
         };
     </script>
 </body>
