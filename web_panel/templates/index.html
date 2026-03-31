@@ -173,7 +173,7 @@
                             class="rounded-lg bg-emerald-500 dark:bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-600 dark:hover:bg-emerald-500">刷新日志</button>
                     </div>
                     <div id="logs-content"
-                        class="h-96 overflow-y-auto rounded-xl border border-slate-800 dark:border-slate-700 bg-slate-900 dark:bg-slate-950 p-4 font-mono text-sm leading-6 text-emerald-300 dark:text-emerald-400"></div>
+                        class="h-96 overflow-y-auto whitespace-pre-wrap break-words rounded-xl border border-slate-800 dark:border-slate-700 bg-slate-900 dark:bg-slate-950 p-4 font-mono text-sm leading-6 text-emerald-300 dark:text-emerald-400"></div>
                 </div>
             </div>
         </section>
@@ -254,6 +254,162 @@
             return resp;
         }
 
+        function createElement(tagName, options = {}) {
+            const {
+                className = '',
+                text = null,
+                id = '',
+                type = '',
+                attrs = {},
+                children = []
+            } = options;
+
+            const element = document.createElement(tagName);
+            if (className) {
+                element.className = className;
+            }
+            if (text !== null) {
+                element.textContent = text;
+            }
+            if (id) {
+                element.id = id;
+            }
+            if (type) {
+                element.type = type;
+            }
+            Object.entries(attrs).forEach(([key, value]) => {
+                if (value !== undefined && value !== null) {
+                    element.setAttribute(key, value);
+                }
+            });
+            children.forEach((child) => {
+                if (child) {
+                    element.appendChild(child);
+                }
+            });
+            return element;
+        }
+
+        function setConfigMessage(kind, message) {
+            const container = document.getElementById('config-message');
+            container.replaceChildren();
+            if (!message) {
+                return;
+            }
+
+            const className = kind === 'success'
+                ? 'rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700'
+                : 'rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700';
+            container.appendChild(createElement('div', { className, text: message }));
+        }
+
+        function createLabeledInput({
+            labelText,
+            id,
+            type = 'text',
+            value = '',
+            placeholder = '',
+            hintText = ''
+        }) {
+            const wrapper = createElement('div');
+            const label = createElement('label', {
+                className: 'mb-1 block text-sm font-semibold text-slate-700 dark:text-slate-300',
+                text: labelText
+            });
+            if (id) {
+                label.htmlFor = id;
+            }
+
+            if (hintText) {
+                label.appendChild(document.createTextNode(' '));
+                label.appendChild(createElement('span', {
+                    className: 'text-xs font-medium text-slate-500 dark:text-slate-400',
+                    text: hintText
+                }));
+            }
+
+            const input = createElement('input', {
+                id,
+                type,
+                className: 'w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-slate-900 dark:text-slate-100 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 dark:focus:ring-brand-900'
+            });
+            input.value = value ?? '';
+            if (placeholder) {
+                input.placeholder = placeholder;
+            }
+
+            wrapper.append(label, input);
+            return wrapper;
+        }
+
+        function createConfigButton(label, className, onClick) {
+            const button = createElement('button', {
+                type: 'button',
+                className,
+                text: label
+            });
+            button.addEventListener('click', onClick);
+            return button;
+        }
+
+        function createRuleField(labelText, inputId, value) {
+            const wrapper = createElement('div');
+            const label = createElement('label', {
+                className: 'mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400',
+                text: labelText
+            });
+            label.htmlFor = inputId;
+            const input = createElement('input', {
+                id: inputId,
+                type: 'text',
+                className: 'w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-sm text-slate-900 dark:text-slate-100 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 dark:focus:ring-brand-900'
+            });
+            input.value = value ?? '';
+            wrapper.append(label, input);
+            return wrapper;
+        }
+
+        function syncCurrentRulesFromForm() {
+            if (!Array.isArray(currentConfig.rules)) {
+                currentConfig.rules = [];
+                return;
+            }
+
+            currentConfig.rules = currentConfig.rules.map((rule, i) => ({
+                ...rule,
+                source_path: document.getElementById(`rule_${i}_source`)?.value ?? rule.source_path ?? '',
+                dest_path: document.getElementById(`rule_${i}_dest`)?.value ?? rule.dest_path ?? '',
+                enabled: document.getElementById(`rule_${i}_enabled`)?.checked ?? Boolean(rule.enabled)
+            }));
+        }
+
+        function createStatCard(value, label, className) {
+            const card = createElement('div', { className });
+            const valueNode = createElement('div', {
+                className: 'text-2xl font-extrabold',
+                text: String(value ?? 0)
+            });
+            const labelNode = createElement('div', {
+                className: 'mt-1 text-sm font-medium',
+                text: label
+            });
+            card.append(valueNode, labelNode);
+            return card;
+        }
+
+        function formatSpeedMBps(value) {
+            const numericValue = Number(value);
+            return Number.isFinite(numericValue) ? numericValue.toString() : '0';
+        }
+
+        function formatBytesInMB(value, fallbackText) {
+            const numericValue = Number(value);
+            if (!Number.isFinite(numericValue)) {
+                return fallbackText;
+            }
+            return `${(numericValue / 1024 / 1024).toFixed(1)} MB`;
+        }
+
         function showTab(tab) {
             document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
             document.querySelectorAll('nav button').forEach(el => el.classList.remove('border-blue-500'));
@@ -267,7 +423,7 @@
             }
 
             if (tab === 'config') {
-                document.getElementById('config-message').innerHTML = '';
+                setConfigMessage('error', '');
                 loadConfig();
             }
             if (tab === 'status') loadStatus();
@@ -283,60 +439,105 @@
                 const resp = await apiFetch(`/api/config?_t=${Date.now()}`);
                 currentConfig = await resp.json();
                 if (currentConfig.error) {
-                    document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">加载配置出错: ${currentConfig.error}</div>`;
+                    setConfigMessage('error', `加载配置出错: ${currentConfig.error}`);
                 }
                 renderConfigForm(currentConfig);
             } catch (err) {
-                document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">请求配置失败: ${err}</div>`;
+                setConfigMessage('error', `请求配置失败: ${err}`);
             }
         }
 
         function renderConfigForm(config) {
             const form = document.getElementById('config-form');
-            form.innerHTML = `
-                <div class="space-y-4">
-                    <div><label class="mb-1 block text-sm font-semibold text-slate-700 dark:text-slate-300">扫描间隔（秒）</label>
-                    <input type="number" id="scan_interval_seconds" value="${config.scan_interval_seconds}" class="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-slate-900 dark:text-slate-100 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 dark:focus:ring-brand-900"></div>
-                    <div><label class="mb-1 block text-sm font-semibold text-slate-700 dark:text-slate-300">刷新间隔（秒）</label>
-                    <input type="number" id="rclone_refresh_interval_seconds" value="${config.rclone_refresh_interval_seconds}" class="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-slate-900 dark:text-slate-100 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 dark:focus:ring-brand-900"></div>
-                    <div><label class="mb-1 block text-sm font-semibold text-slate-700 dark:text-slate-300">最大并发下载数</label>
-                    <input type="number" id="max_concurrent_downloads" value="${config.max_concurrent_downloads}" class="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-slate-900 dark:text-slate-100 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 dark:focus:ring-brand-900"></div>
-                    <div><label class="mb-1 block text-sm font-semibold text-slate-700 dark:text-slate-300">最大重试次数</label>
-                    <input type="number" id="max_retry_count" value="${config.max_retry_count}" class="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-slate-900 dark:text-slate-100 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 dark:focus:ring-brand-900"></div>
-                    <div><label class="mb-1 block text-sm font-semibold text-slate-700 dark:text-slate-300">带宽限制（MB/s，0=无限制）</label>
-                    <input type="number" id="bandwidth_limit_mbps" value="${config.bandwidth_limit_mbps}" class="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-slate-900 dark:text-slate-100 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 dark:focus:ring-brand-900"></div>
-                    <div><label class="mb-1 block text-sm font-semibold text-slate-700 dark:text-slate-300">rclone 命令</label>
-                    <input type="text" id="rclone_command" value="${config.rclone_command}" class="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-slate-900 dark:text-slate-100 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 dark:focus:ring-brand-900"></div>
-                    <div><label class="mb-1 block text-sm font-semibold text-slate-700 dark:text-slate-300">rclone 服务名</label>
-                    <input type="text" id="rclone_service_name" value="${config.rclone_service_name}" class="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-slate-900 dark:text-slate-100 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 dark:focus:ring-brand-900"></div>
-                    <div><label class="mb-1 block text-sm font-semibold text-slate-700 dark:text-slate-300">同步脚本 service 名 <span class="text-xs font-medium text-slate-500 dark:text-slate-400">（保存后自动 systemctl restart，留空则跳过）</span></label>
-                    <input type="text" id="sync_service_name" value="${config.sync_service_name || ''}" placeholder="例如：sync_daemon.service" class="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-slate-900 dark:text-slate-100 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 dark:focus:ring-brand-900"></div>
-                    <div>
-                        <div class="flex items-center justify-between gap-3">
-                            <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300">同步规则</label>
-                            <button type="button" onclick="addRule()" class="rounded-lg bg-emerald-500 dark:bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-600 dark:hover:bg-emerald-500">添加规则</button>
-                        </div>
-                        <div id="rules-list" class="mt-3 space-y-3"></div>
-                    </div>
-                </div>
-            `;
+            const content = createElement('div', { className: 'space-y-4' });
+            const fields = [
+                { labelText: '扫描间隔（秒）', id: 'scan_interval_seconds', type: 'number', value: config.scan_interval_seconds },
+                { labelText: '刷新间隔（秒）', id: 'rclone_refresh_interval_seconds', type: 'number', value: config.rclone_refresh_interval_seconds },
+                { labelText: '最大并发下载数', id: 'max_concurrent_downloads', type: 'number', value: config.max_concurrent_downloads },
+                { labelText: '最大重试次数', id: 'max_retry_count', type: 'number', value: config.max_retry_count },
+                { labelText: '带宽限制（MB/s，0=无限制）', id: 'bandwidth_limit_mbps', type: 'number', value: config.bandwidth_limit_mbps },
+                { labelText: 'rclone 命令', id: 'rclone_command', type: 'text', value: config.rclone_command },
+                { labelText: 'rclone 服务名', id: 'rclone_service_name', type: 'text', value: config.rclone_service_name },
+                {
+                    labelText: '同步脚本 service 名',
+                    id: 'sync_service_name',
+                    type: 'text',
+                    value: config.sync_service_name || '',
+                    placeholder: '例如：sync_daemon.service',
+                    hintText: '（保存后自动 systemctl restart，留空则跳过）'
+                }
+            ];
+
+            fields.forEach((field) => {
+                content.appendChild(createLabeledInput(field));
+            });
+
+            const rulesSection = createElement('div');
+            const rulesHeader = createElement('div', {
+                className: 'flex items-center justify-between gap-3'
+            });
+            rulesHeader.append(
+                createElement('label', {
+                    className: 'block text-sm font-semibold text-slate-700 dark:text-slate-300',
+                    text: '同步规则'
+                }),
+                createConfigButton(
+                    '添加规则',
+                    'rounded-lg bg-emerald-500 dark:bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-600 dark:hover:bg-emerald-500',
+                    addRule
+                )
+            );
+            const rulesList = createElement('div', {
+                id: 'rules-list',
+                className: 'mt-3 space-y-3'
+            });
+            rulesSection.append(rulesHeader, rulesList);
+            content.appendChild(rulesSection);
+
+            form.replaceChildren(content);
             renderRules(config.rules || []);
         }
 
         function renderRules(rules) {
             const list = document.getElementById('rules-list');
-            list.innerHTML = rules.map((rule, i) => `
-                <div class="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/70 p-3">
-                    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                        <div><label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">源路径</label><input type="text" id="rule_${i}_source" value="${rule.source_path}" class="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-sm text-slate-900 dark:text-slate-100 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 dark:focus:ring-brand-900"></div>
-                        <div><label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">目标路径</label><input type="text" id="rule_${i}_dest" value="${rule.dest_path}" class="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-sm text-slate-900 dark:text-slate-100 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 dark:focus:ring-brand-900"></div>
-                    </div>
-                    <div class="mt-3 flex items-end justify-between">
-                        <label class="inline-flex items-center text-sm font-medium text-slate-700 dark:text-slate-300"><input type="checkbox" id="rule_${i}_enabled" ${rule.enabled ? 'checked' : ''} class="mr-2 h-4 w-4 rounded border-slate-300 dark:border-slate-600 text-brand-600 focus:ring-brand-500">启用</label>
-                        <button type="button" onclick="deleteRule(${i})" class="rounded-lg bg-rose-500 dark:bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-rose-600 dark:hover:bg-rose-500">删除</button>
-                    </div>
-                </div>
-            `).join('');
+            list.replaceChildren();
+
+            rules.forEach((rule, i) => {
+                const card = createElement('div', {
+                    className: 'rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/70 p-3'
+                });
+                const grid = createElement('div', {
+                    className: 'grid grid-cols-1 gap-3 sm:grid-cols-2'
+                });
+                grid.append(
+                    createRuleField('源路径', `rule_${i}_source`, rule.source_path),
+                    createRuleField('目标路径', `rule_${i}_dest`, rule.dest_path)
+                );
+
+                const footer = createElement('div', {
+                    className: 'mt-3 flex items-end justify-between'
+                });
+                const checkboxLabel = createElement('label', {
+                    className: 'inline-flex items-center text-sm font-medium text-slate-700 dark:text-slate-300'
+                });
+                const checkbox = createElement('input', {
+                    id: `rule_${i}_enabled`,
+                    type: 'checkbox',
+                    className: 'mr-2 h-4 w-4 rounded border-slate-300 dark:border-slate-600 text-brand-600 focus:ring-brand-500'
+                });
+                checkbox.checked = Boolean(rule.enabled);
+                checkboxLabel.append(checkbox, document.createTextNode('启用'));
+
+                const deleteButton = createConfigButton(
+                    '删除',
+                    'rounded-lg bg-rose-500 dark:bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-rose-600 dark:hover:bg-rose-500',
+                    () => deleteRule(i)
+                );
+
+                footer.append(checkboxLabel, deleteButton);
+                card.append(grid, footer);
+                list.appendChild(card);
+            });
         }
 
         async function saveConfig() {
@@ -365,9 +566,7 @@
                 body: JSON.stringify(newConfig)
             });
             const result = await resp.json();
-            document.getElementById('config-message').innerHTML = result.error ?
-                `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">${result.error}</div>` :
-                `<div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">${result.message}</div>`;
+            setConfigMessage(result.error ? 'error' : 'success', result.error || result.message);
         }
 
         async function addRule() {
@@ -375,7 +574,7 @@
             if (sourcePathInput === null) return;
             const sourcePath = sourcePathInput.trim();
             if (!sourcePath) {
-                document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">source_path 不能为空</div>`;
+                setConfigMessage('error', 'source_path 不能为空');
                 return;
             }
 
@@ -383,7 +582,7 @@
             if (destPathInput === null) return;
             const destPath = destPathInput.trim();
             if (!destPath) {
-                document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">dest_path 不能为空</div>`;
+                setConfigMessage('error', 'dest_path 不能为空');
                 return;
             }
 
@@ -392,12 +591,7 @@
             }
 
             // Preserve current form edits and append the new rule at the end.
-            currentConfig.rules = (currentConfig.rules || []).map((rule, i) => ({
-                ...rule,
-                source_path: document.getElementById(`rule_${i}_source`)?.value ?? rule.source_path,
-                dest_path: document.getElementById(`rule_${i}_dest`)?.value ?? rule.dest_path,
-                enabled: document.getElementById(`rule_${i}_enabled`)?.checked ?? rule.enabled
-            }));
+            syncCurrentRulesFromForm();
 
             currentConfig.rules.push({
                 source_path: sourcePath,
@@ -407,7 +601,7 @@
             });
 
             renderRules(currentConfig.rules);
-            document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">规则已添加到列表底部，请点击“保存配置”生效。</div>`;
+            setConfigMessage('success', '规则已添加到列表底部，请点击“保存配置”生效。');
         }
 
         async function deleteRule(ruleIndex) {
@@ -419,11 +613,11 @@
             });
             const result = await resp.json();
             if (result.error) {
-                document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">${result.error}</div>`;
+                setConfigMessage('error', result.error);
                 return;
             }
 
-            document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">${result.message}</div>`;
+            setConfigMessage('success', result.message);
             await loadConfig();
         }
 
@@ -440,14 +634,16 @@
             const stats = await statsResp.json();
             currentState = await stateResp.json();
 
-            document.getElementById('stats-cards').innerHTML = `
-                <div class="rounded-xl border border-blue-100 dark:border-blue-900 bg-blue-50/90 dark:bg-blue-950/70 p-4"><div class="text-2xl font-extrabold text-blue-900 dark:text-blue-200">${stats.total}</div><div class="mt-1 text-sm font-medium text-blue-800 dark:text-blue-300">总文件数</div></div>
-                <div class="rounded-xl border border-emerald-100 dark:border-emerald-900 bg-emerald-50/90 dark:bg-emerald-950/70 p-4"><div class="text-2xl font-extrabold text-emerald-900 dark:text-emerald-200">${stats.synced}</div><div class="mt-1 text-sm font-medium text-emerald-800 dark:text-emerald-300">已同步</div></div>
-                <div class="rounded-xl border border-amber-100 dark:border-amber-900 bg-amber-50/90 dark:bg-amber-950/70 p-4"><div class="text-2xl font-extrabold text-amber-900 dark:text-amber-200">${stats.pending}</div><div class="mt-1 text-sm font-medium text-amber-800 dark:text-amber-300">待同步</div></div>
-                <div class="rounded-xl border border-rose-100 dark:border-rose-900 bg-rose-50/90 dark:bg-rose-950/70 p-4"><div class="text-2xl font-extrabold text-rose-900 dark:text-rose-200">${stats.failed}</div><div class="mt-1 text-sm font-medium text-rose-800 dark:text-rose-300">失败</div></div>
-                <div class="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100/90 dark:bg-slate-800/90 p-4"><div class="text-2xl font-extrabold text-slate-800 dark:text-slate-200">${stats.baseline}</div><div class="mt-1 text-sm font-medium text-slate-700 dark:text-slate-300">基线</div></div>
-                <div class="rounded-xl border border-fuchsia-100 dark:border-fuchsia-900 bg-fuchsia-50/90 dark:bg-fuchsia-950/70 p-4"><div class="text-2xl font-extrabold text-fuchsia-900 dark:text-fuchsia-200">${stats.permanent_failed}</div><div class="mt-1 text-sm font-medium text-fuchsia-800 dark:text-fuchsia-300">永久失败</div></div>
-            `;
+            const statsCards = document.getElementById('stats-cards');
+            const cards = [
+                createStatCard(stats.total, '总文件数', 'rounded-xl border border-blue-100 dark:border-blue-900 bg-blue-50/90 dark:bg-blue-950/70 p-4 text-blue-900 dark:text-blue-200'),
+                createStatCard(stats.synced, '已同步', 'rounded-xl border border-emerald-100 dark:border-emerald-900 bg-emerald-50/90 dark:bg-emerald-950/70 p-4 text-emerald-900 dark:text-emerald-200'),
+                createStatCard(stats.pending, '待同步', 'rounded-xl border border-amber-100 dark:border-amber-900 bg-amber-50/90 dark:bg-amber-950/70 p-4 text-amber-900 dark:text-amber-200'),
+                createStatCard(stats.failed, '失败', 'rounded-xl border border-rose-100 dark:border-rose-900 bg-rose-50/90 dark:bg-rose-950/70 p-4 text-rose-900 dark:text-rose-200'),
+                createStatCard(stats.baseline, '基线', 'rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100/90 dark:bg-slate-800/90 p-4 text-slate-800 dark:text-slate-200'),
+                createStatCard(stats.permanent_failed, '永久失败', 'rounded-xl border border-fuchsia-100 dark:border-fuchsia-900 bg-fuchsia-50/90 dark:bg-fuchsia-950/70 p-4 text-fuchsia-900 dark:text-fuchsia-200')
+            ];
+            statsCards.replaceChildren(...cards);
 
             renderFilesTable();
         }
@@ -456,10 +652,27 @@
             if (!currentState) return;
 
             let files = [];
-            let folderOptionsHTML = `<option value="all" ${currentFolderFilter === 'all' ? 'selected' : ''}>所有文件夹</option>`;
+            const tableContainer = document.getElementById('files-table');
+            tableContainer.replaceChildren();
+
+            const filterWrapper = createElement('div', { className: 'mb-4' });
+            const folderSelect = createElement('select', {
+                className: 'max-w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-700 dark:text-slate-300 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 dark:focus:ring-brand-900'
+            });
+            folderSelect.add(new Option('所有文件夹', 'all', currentFolderFilter === 'all', currentFolderFilter === 'all'));
+            folderSelect.addEventListener('change', (event) => {
+                currentFolderFilter = event.target.value;
+                currentPage = 1;
+                renderFilesTable();
+            });
 
             for (const [ruleId, ruleData] of Object.entries(currentState.rules || {})) {
-                folderOptionsHTML += `<option value="${ruleId}" ${currentFolderFilter === ruleId ? 'selected' : ''}>${ruleData.source_path}</option>`;
+                folderSelect.add(new Option(
+                    ruleData.source_path || ruleId,
+                    ruleId,
+                    currentFolderFilter === ruleId,
+                    currentFolderFilter === ruleId
+                ));
                 if (currentFolderFilter === 'all' || currentFolderFilter === ruleId) {
                     for (const [path, info] of Object.entries(ruleData.files || {})) {
                         files.push({ path, ...info });
@@ -471,38 +684,78 @@
             if (currentPage > totalPages) currentPage = totalPages;
             const pageFiles = files.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
 
-            const pagerHTML = `
-                <div class="mt-4 flex flex-wrap items-center gap-2">
-                    <button onclick="changePage(-1)" class="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm text-slate-700 dark:text-slate-300 transition hover:bg-slate-100 dark:hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40" ${currentPage <= 1 ? 'disabled' : ''}>上一页</button>
-                    <span class="text-sm text-slate-600 dark:text-slate-400">第 ${currentPage} / ${totalPages} 页（共 ${files.length} 条）</span>
-                    <button onclick="changePage(1)" class="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm text-slate-700 dark:text-slate-300 transition hover:bg-slate-100 dark:hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40" ${currentPage >= totalPages ? 'disabled' : ''}>下一页</button>
-                </div>
-            `;
+            filterWrapper.appendChild(folderSelect);
 
-            document.getElementById('files-table').innerHTML = `
-                <div class="mb-4">
-                    <select onchange="currentFolderFilter=this.value; currentPage=1; renderFilesTable()" class="max-w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-700 dark:text-slate-300 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 dark:focus:ring-brand-900">
-                        ${folderOptionsHTML}
-                    </select>
-                </div>
-                <div class="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900"><table class="min-w-full text-sm">
-                    <thead class="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300"><tr>
-                        <th class="px-3 py-2 text-left font-semibold">文件路径</th>
-                        <th class="px-3 py-2 text-left font-semibold">状态</th>
-                        <th class="px-3 py-2 text-left font-semibold">重试次数</th>
-                        <th class="px-3 py-2 text-left font-semibold">最后错误</th>
-                    </tr></thead>
-                    <tbody>${pageFiles.map(f => `
-                        <tr class="border-b border-slate-100 dark:border-slate-800 last:border-none">
-                            <td class="max-w-xs truncate px-3 py-2 text-slate-800 dark:text-slate-200">${f.path}</td>
-                            <td class="px-3 py-2"><span class="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${getStatusColor(f.status)}">${f.status}</span></td>
-                            <td class="px-3 py-2 text-slate-700 dark:text-slate-300">${f.retry_count || 0}</td>
-                            <td class="max-w-xs truncate px-3 py-2 text-slate-600 dark:text-slate-400">${f.last_error || '-'}</td>
-                        </tr>
-                    `).join('')}</tbody>
-                </table></div>
-                ${pagerHTML}
-            `;
+            const tableWrapper = createElement('div', {
+                className: 'overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900'
+            });
+            const table = createElement('table', { className: 'min-w-full text-sm' });
+            const thead = createElement('thead', {
+                className: 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+            });
+            const headRow = createElement('tr');
+            ['文件路径', '状态', '重试次数', '最后错误'].forEach((title) => {
+                headRow.appendChild(createElement('th', {
+                    className: 'px-3 py-2 text-left font-semibold',
+                    text: title
+                }));
+            });
+            thead.appendChild(headRow);
+
+            const tbody = createElement('tbody');
+            pageFiles.forEach((file) => {
+                const row = createElement('tr', {
+                    className: 'border-b border-slate-100 dark:border-slate-800 last:border-none'
+                });
+                const pathCell = createElement('td', {
+                    className: 'max-w-xs truncate px-3 py-2 text-slate-800 dark:text-slate-200',
+                    text: file.path
+                });
+                const statusCell = createElement('td', { className: 'px-3 py-2' });
+                const statusBadge = createElement('span', {
+                    className: `inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${getStatusColor(file.status)}`,
+                    text: file.status || 'unknown'
+                });
+                statusCell.appendChild(statusBadge);
+                const retryCell = createElement('td', {
+                    className: 'px-3 py-2 text-slate-700 dark:text-slate-300',
+                    text: String(file.retry_count || 0)
+                });
+                const errorCell = createElement('td', {
+                    className: 'max-w-xs truncate px-3 py-2 text-slate-600 dark:text-slate-400',
+                    text: file.last_error || '-'
+                });
+                row.append(pathCell, statusCell, retryCell, errorCell);
+                tbody.appendChild(row);
+            });
+
+            table.append(thead, tbody);
+            tableWrapper.appendChild(table);
+
+            const pager = createElement('div', {
+                className: 'mt-4 flex flex-wrap items-center gap-2'
+            });
+            const previousButton = createConfigButton(
+                '上一页',
+                'rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm text-slate-700 dark:text-slate-300 transition hover:bg-slate-100 dark:hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40',
+                () => changePage(-1)
+            );
+            previousButton.disabled = currentPage <= 1;
+
+            const pageText = createElement('span', {
+                className: 'text-sm text-slate-600 dark:text-slate-400',
+                text: `第 ${currentPage} / ${totalPages} 页（共 ${files.length} 条）`
+            });
+
+            const nextButton = createConfigButton(
+                '下一页',
+                'rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm text-slate-700 dark:text-slate-300 transition hover:bg-slate-100 dark:hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40',
+                () => changePage(1)
+            );
+            nextButton.disabled = currentPage >= totalPages;
+
+            pager.append(previousButton, pageText, nextButton);
+            tableContainer.append(filterWrapper, tableWrapper, pager);
         }
 
         function changePage(delta) {
@@ -523,23 +776,48 @@
 
         function renderProgress(data) {
             const list = document.getElementById('progress-list');
-            if (Object.keys(data).length === 0) {
-                list.innerHTML = '<div class="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 py-10 text-center text-sm font-medium text-slate-500 dark:text-slate-400">暂无下载任务</div>';
+            list.replaceChildren();
+            if (data?.error) {
+                list.appendChild(createElement('div', {
+                    className: 'rounded-xl border border-red-200 bg-red-50 py-10 text-center text-sm font-medium text-red-700',
+                    text: `加载实时进度失败: ${data.error}`
+                }));
                 return;
             }
 
-            list.innerHTML = Object.entries(data).map(([key, item]) => {
-                const progress = item.progress;
+            const entries = Object.entries(data || {}).filter(([, item]) => item && typeof item === 'object');
+            if (entries.length === 0) {
+                list.appendChild(createElement('div', {
+                    className: 'rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 py-10 text-center text-sm font-medium text-slate-500 dark:text-slate-400',
+                    text: '暂无下载任务'
+                }));
+                return;
+            }
+
+            entries.forEach(([, item]) => {
+                const progress = item.progress || {};
+                const sourceFile = item.transfer_info?.source_file || '';
                 if (progress.connecting) {
-                    return `
-                        <div class="mb-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 shadow-sm">
-                            <div class="mb-2 truncate text-sm font-semibold text-slate-800 dark:text-slate-200">${progress.current_file || item.transfer_info.source_file}</div>
-                            <div class="relative mb-1 h-4 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
-                                <div class="h-4 w-full animate-pulse rounded-full bg-sky-300 dark:bg-sky-600"></div>
-                            </div>
-                            <div class="text-sm font-medium text-amber-600 dark:text-amber-400">连接 rclone 中…</div>
-                        </div>
-                    `;
+                    const connectingCard = createElement('div', {
+                        className: 'mb-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 shadow-sm'
+                    });
+                    const title = createElement('div', {
+                        className: 'mb-2 truncate text-sm font-semibold text-slate-800 dark:text-slate-200',
+                        text: progress.current_file || sourceFile
+                    });
+                    const barOuter = createElement('div', {
+                        className: 'relative mb-1 h-4 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700'
+                    });
+                    barOuter.appendChild(createElement('div', {
+                        className: 'h-4 w-full animate-pulse rounded-full bg-sky-300 dark:bg-sky-600'
+                    }));
+                    const status = createElement('div', {
+                        className: 'text-sm font-medium text-amber-600 dark:text-amber-400',
+                        text: '连接 rclone 中…'
+                    });
+                    connectingCard.append(title, barOuter, status);
+                    list.appendChild(connectingCard);
+                    return;
                 }
                 // Normalize percentage to avoid invalid width values (e.g. undefined/NaN/string)
                 const percentageValue = Number(progress.percentage);
@@ -549,17 +827,33 @@
                 // Use at least 5% width so the bar is always visible once transfer starts
                 const barWidth = safePercentage > 0 ? Math.max(safePercentage, 5) : 0;
                 const percentageText = safePercentage.toFixed(2).replace(/\.?0+$/, '');
-                return `
-                    <div class="mb-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 shadow-sm">
-                        <div class="mb-2 truncate text-sm font-semibold text-slate-800 dark:text-slate-200">${progress.current_file || item.transfer_info.source_file}</div>
-                        <div class="relative mb-1 h-4 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
-                            <div class="h-4 rounded-full transition-all duration-300 ease-out" style="width: ${barWidth}%; background-color: #2d8cff;"></div>
-                        </div>
-                        <div class="mb-1 text-sm text-slate-700 dark:text-slate-300">${percentageText}% &nbsp;|&nbsp; 速度: ${progress.speedMBps} MB/s &nbsp;|&nbsp; 剩余: ${progress.eta != null ? Math.round(progress.eta) + 's' : '计算中'}</div>
-                        <div class="text-xs text-slate-500 dark:text-slate-400">${progress.bytes ? (progress.bytes / 1024 / 1024).toFixed(1) + ' MB' : '0 MB'} / ${progress.totalBytes ? (progress.totalBytes / 1024 / 1024).toFixed(1) + ' MB' : '未知'}</div>
-                    </div>
-                `;
-            }).join('');
+                const progressCard = createElement('div', {
+                    className: 'mb-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 shadow-sm'
+                });
+                const title = createElement('div', {
+                    className: 'mb-2 truncate text-sm font-semibold text-slate-800 dark:text-slate-200',
+                    text: progress.current_file || sourceFile
+                });
+                const barOuter = createElement('div', {
+                    className: 'relative mb-1 h-4 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700'
+                });
+                const barInner = createElement('div', {
+                    className: 'h-4 rounded-full transition-all duration-300 ease-out'
+                });
+                barInner.style.width = `${barWidth}%`;
+                barInner.style.backgroundColor = '#2d8cff';
+                barOuter.appendChild(barInner);
+                const meta = createElement('div', {
+                    className: 'mb-1 text-sm text-slate-700 dark:text-slate-300',
+                    text: `${percentageText}% | 速度: ${formatSpeedMBps(progress.speedMBps)} MB/s | 剩余: ${progress.eta != null ? Math.round(progress.eta) + 's' : '计算中'}`
+                });
+                const bytes = createElement('div', {
+                    className: 'text-xs text-slate-500 dark:text-slate-400',
+                    text: `${formatBytesInMB(progress.bytes, '0 MB')} / ${Number(progress.totalBytes) ? formatBytesInMB(progress.totalBytes, '未知') : '未知'}`
+                });
+                progressCard.append(title, barOuter, meta, bytes);
+                list.appendChild(progressCard);
+            });
         }
 
         socket.on('progress_update', renderProgress);
@@ -577,7 +871,8 @@
         async function loadLogs() {
             const resp = await apiFetch(`/api/logs?lines=200&_t=${Date.now()}`);
             const data = await resp.json();
-            document.getElementById('logs-content').innerHTML = data.logs.join('');
+            const logsContent = document.getElementById('logs-content');
+            logsContent.textContent = data.error || (Array.isArray(data.logs) ? data.logs.join('') : '');
         }
 
         window.onload = () => {
