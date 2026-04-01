@@ -10,3 +10,4 @@ web_panel/SECURITY_REVIEW.md
 # Runtime files
 sync_state.json*
 sync.log*
+AGENTS.md
