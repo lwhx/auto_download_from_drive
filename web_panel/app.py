@@ -64,6 +64,9 @@ AUTH_RATE_LIMIT_WINDOW_SECONDS  = int(os.getenv('WEB_PANEL_AUTH_WINDOW_SECONDS',
 AUTH_RATE_LIMIT_LOCKOUT_SECONDS = int(os.getenv('WEB_PANEL_AUTH_LOCKOUT_SECONDS', '900'))
 AUTH_RATE_LIMIT_CLEANUP_INTERVAL = int(os.getenv('WEB_PANEL_AUTH_CLEANUP_INTERVAL', '300'))
 
+# ==================== Log API protection ====================
+LOG_API_MAX_LINES = int(os.getenv('WEB_PANEL_LOG_MAX_LINES', '10000'))
+
 # ip -> {'count': int, 'window_start': float, 'locked_until': float}
 _auth_failures: dict = {}
 _auth_failures_lock = threading.Lock()
@@ -225,8 +228,29 @@ CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
 STATE_PATH = os.path.join(BASE_DIR, 'sync_state.json')
 LOG_PATH = os.path.join(BASE_DIR, 'sync.log')
 TRANSFERS_PATH = os.path.join(BASE_DIR, 'active_transfers.json')
+RUNTIME_STATUS_PATH = os.path.join(BASE_DIR, 'runtime_status.json')
 SYNC_SERVICE_NAME = 'sync.service'
 RCLONE_SERVICE_PREFIX = 'rclone-'
+
+BLOCKED_PATH_PREFIXES = ('/etc', '/var', '/proc', '/sys', '/dev', '/boot', '/sbin', '/usr')
+
+
+def _validate_rule_path(path_value, field_name):
+    if not isinstance(path_value, str) or not path_value.strip():
+        return False, f'{field_name} is required'
+
+    path_value = path_value.strip()
+
+    if not os.path.isabs(path_value):
+        return False, f'{field_name} must be an absolute path'
+
+    normalized = os.path.normpath(path_value)
+
+    for prefix in BLOCKED_PATH_PREFIXES:
+        if normalized == prefix or normalized.startswith(prefix + '/'):
+            return False, f'{field_name} must not point to system directory: {prefix}'
+
+    return True, None
 
 
 def _normalize_config(config):
@@ -287,6 +311,45 @@ def _run_systemctl(action, service_name, timeout=15):
             deduped.append(msg)
     return False, ' | '.join(deduped)
 
+
+def _read_runtime_status():
+    if not os.path.exists(RUNTIME_STATUS_PATH):
+        return None, 'runtime_status.json is missing'
+
+    try:
+        with open(RUNTIME_STATUS_PATH, 'r') as f:
+            status = json.load(f)
+    except Exception as e:
+        return None, f'failed to read runtime_status.json: {e}'
+
+    if not isinstance(status, dict):
+        return None, 'runtime_status.json is invalid'
+
+    active_downloads = int(status.get('active_downloads', 0))
+    queued_downloads = int(status.get('queued_downloads', 0))
+    status['active_downloads'] = active_downloads
+    status['queued_downloads'] = queued_downloads
+    status['service_restart_allowed'] = bool(
+        status.get('service_restart_allowed', active_downloads == 0 and queued_downloads == 0)
+    )
+    return status, None
+
+
+def _can_restart_sync_service():
+    status, error = _read_runtime_status()
+    if error:
+        return False, f'无法确认当前下载是否空闲：{error}'
+
+    if not status.get('service_restart_allowed', False):
+        active_downloads = status.get('active_downloads', 0)
+        queued_downloads = status.get('queued_downloads', 0)
+        return False, (
+            f'检测到下载任务未清空（active={active_downloads}, queued={queued_downloads}），'
+            f'已跳过自动重启 {SYNC_SERVICE_NAME}'
+        )
+
+    return True, ''
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -329,6 +392,16 @@ def update_config():
         if new_config.get('bandwidth_limit_mbps', -1) < 0:
             return jsonify({'error': 'bandwidth_limit_mbps must be >= 0'}), 400
 
+        for i, rule in enumerate(new_config.get('rules', [])):
+            if not isinstance(rule, dict):
+                return jsonify({'error': f'rules[{i}] must be an object'}), 400
+            ok, err = _validate_rule_path(rule.get('source_path', ''), f'rules[{i}].source_path')
+            if not ok:
+                return jsonify({'error': err}), 400
+            ok, err = _validate_rule_path(rule.get('dest_path', ''), f'rules[{i}].dest_path')
+            if not ok:
+                return jsonify({'error': err}), 400
+
         normalized_config, error = _normalize_config(new_config)
         if error:
             return jsonify({'error': error}), 400
@@ -336,15 +409,19 @@ def update_config():
         with open(CONFIG_PATH, 'w') as f:
             json.dump(normalized_config, f, indent=2)
 
-        # 同步脚本 service 固定为 sync.service，保存后自动 restart
+        # 同步脚本 service 固定为 sync.service，但仅允许在下载与队列都空闲时自动 restart。
         sync_service = SYNC_SERVICE_NAME
         restart_msg = ''
         try:
-            ok, err = _run_systemctl('restart', sync_service, timeout=15)
-            if ok:
-                restart_msg = f'，已自动重启 {sync_service}'
+            can_restart, reason = _can_restart_sync_service()
+            if not can_restart:
+                restart_msg = f'，但未自动重启 {sync_service}：{reason}'
             else:
-                restart_msg = f'，但重启 {sync_service} 失败：{err or "unknown error"}'
+                ok, err = _run_systemctl('restart', sync_service, timeout=15)
+                if ok:
+                    restart_msg = f'，已自动重启 {sync_service}'
+                else:
+                    restart_msg = f'，但重启 {sync_service} 失败：{err or "unknown error"}'
         except Exception as e:
             restart_msg = f'，但重启 {sync_service} 出错：{e}'
 
@@ -360,10 +437,12 @@ def add_config_rule():
         source_path = (payload.get('source_path') or '').strip()
         dest_path = (payload.get('dest_path') or '').strip()
 
-        if not source_path:
-            return jsonify({'error': 'source_path is required'}), 400
-        if not dest_path:
-            return jsonify({'error': 'dest_path is required'}), 400
+        ok, err = _validate_rule_path(source_path, 'source_path')
+        if not ok:
+            return jsonify({'error': err}), 400
+        ok, err = _validate_rule_path(dest_path, 'dest_path')
+        if not ok:
+            return jsonify({'error': err}), 400
 
         with open(CONFIG_PATH, 'r') as f:
             config = json.load(f)
@@ -449,6 +528,7 @@ def get_stats():
 def get_logs():
     try:
         lines = int(request.args.get('lines', 100))
+        lines = min(lines, LOG_API_MAX_LINES)
         log_file = LOG_PATH if os.path.exists(LOG_PATH) else LOG_PATH + '.1'
 
         if not os.path.exists(log_file):
@@ -492,10 +572,26 @@ def background_progress_monitor():
 socketio.start_background_task(background_progress_monitor)
 
 @socketio.on('connect')
-def handle_connect():
+def handle_connect(auth=None):
     if API_KEY and not _has_valid_session():
         logger.warning(f'Unauthenticated SocketIO connection rejected from {request.remote_addr}')
         return False
+
+    expected_token = session.get(CSRF_SESSION_KEY, '')
+    provided_token = ''
+    if isinstance(auth, dict):
+        provided_token = auth.get('csrf_token', '')
+
+    if (
+        not isinstance(expected_token, str) or
+        not expected_token or
+        not isinstance(provided_token, str) or
+        not provided_token or
+        not hmac.compare_digest(provided_token, expected_token)
+    ):
+        logger.warning(f'SocketIO connection rejected due to invalid CSRF token from {request.remote_addr}')
+        return False
+
     logger.info(f'SocketIO client connected: {request.remote_addr}')
 
 @socketio.on('disconnect')

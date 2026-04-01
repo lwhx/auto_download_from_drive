@@ -239,6 +239,23 @@ sudo systemctl reload nginx
 
 确保 Nginx 暴露的域名与 `.env` 中 `WEB_PANEL_ALLOWED_ORIGINS` 保持一致。
 
+### 使用 Caddy 作为反向代理
+
+如果使用 Caddy，请参考 `Caddyfile.example` 配置文件。该配置包含：
+- 自动 HTTPS（Let's Encrypt）
+- 完整的安全响应头（X-Frame-Options, HSTS, CSP 等）
+- WebSocket 支持（Socket.IO）
+- 真实客户端 IP 传递
+
+复制并修改配置：
+```bash
+cp Caddyfile.example /etc/caddy/Caddyfile
+# 编辑配置，替换域名和 IP 白名单
+sudo caddy reload
+```
+
+确保 Caddy 暴露的域名与 `.env` 中 `WEB_PANEL_ALLOWED_ORIGINS` 保持一致。
+
 ### 1.7 常用运维命令
 
 ```bash
@@ -312,11 +329,11 @@ tail -f /var/log/web-panel/error.log
     - 开关 `enabled` 状态。
     - 删除规则（`DELETE /api/config/rules/<index>`）。
 
-- 保存配置时，后端会自动尝试：
+- 保存配置时，后端只会在守护进程运行态显示“活动下载数 = 0 且排队数 = 0”时自动尝试：
   ```bash
   systemctl restart sync.service
   ```
-  并在返回信息中附上重启是否成功的提示。
+  若当前仍有下载或排队任务，则只保存配置，不自动重启，并在返回信息中说明跳过原因。
 
 ### 2.2 状态监控（/api/state, /api/stats）
 
@@ -551,7 +568,7 @@ Flask 应用 app.py
 
 - 与上游 Sync Daemon 的耦合：
   - Web 面板只读写少量控制面文件（主要是 `config.json`），其余状态均为只读。
-  - 同步规则变更后，通过 `systemctl restart <sync_service_name>` 驱动上游重新加载配置。
+  - 同步规则变更后，仅在 daemon 的 `runtime_status.json` 报告下载与队列都空闲时，才通过 `systemctl restart <sync_service_name>` 驱动上游重新加载配置。
 
 ---
 

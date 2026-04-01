@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Tuple
 CONFIG_FILE = "config.json"
 STATE_FILE = "sync_state.json"
 LOG_FILE = "sync.log"
+RUNTIME_STATUS_FILE = "runtime_status.json"
 SERVICE_NAME = "rclone-pikpak"
 
 DEFAULT_CONFIG = {
@@ -70,6 +71,7 @@ class SyncDaemon:
         self.config_path = self.base_dir / CONFIG_FILE
         self.state_path = self.base_dir / STATE_FILE
         self.log_path = self.base_dir / LOG_FILE
+        self.runtime_status_path = self.base_dir / RUNTIME_STATUS_FILE
 
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
@@ -94,6 +96,7 @@ class SyncDaemon:
         self.rc_port_lock = threading.Lock()
         self.reserved_rc_ports = set()
         self.logger = self._setup_logging()
+        self.write_runtime_status()
 
     def _setup_logging(self) -> logging.Logger:
         logger = logging.getLogger("sync_daemon")
@@ -136,6 +139,32 @@ class SyncDaemon:
         if fields:
             payload.update(fields)
         self.logger.error(json.dumps(payload, ensure_ascii=False), extra={"event_type": event_type})
+
+    def _write_json_atomic(self, path: Path, payload: object) -> None:
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as fp:
+            json.dump(payload, fp, indent=2)
+            fp.write("\n")
+        os.replace(tmp_path, path)
+
+    def get_download_counters(self) -> Tuple[int, int]:
+        with self.queue_lock:
+            return self.active_downloads, self.download_queue.qsize()
+
+    def write_runtime_status(self, active_downloads: Optional[int] = None, queued_downloads: Optional[int] = None) -> None:
+        if active_downloads is None or queued_downloads is None:
+            active_downloads, queued_downloads = self.get_download_counters()
+
+        payload = {
+            "active_downloads": active_downloads,
+            "queued_downloads": queued_downloads,
+            "download_work_active": (active_downloads + queued_downloads) > 0,
+            "service_restart_allowed": active_downloads == 0 and queued_downloads == 0,
+            "pause_requested": self.pause_event.is_set(),
+            "stop_requested": self.stop_event.is_set(),
+            "updated_at": self.now_iso(),
+        }
+        self._write_json_atomic(self.runtime_status_path, payload)
 
     def ensure_config(self) -> bool:
         if self.config_path.exists():
@@ -468,6 +497,10 @@ class SyncDaemon:
                 return False
             self.download_queue.put((rule_id, source_file, dest_path))
             self.queued_files.add(key)
+            active = self.active_downloads
+            queued = self.download_queue.qsize()
+
+        self.write_runtime_status(active_downloads=active, queued_downloads=queued)
 
         return True
 
@@ -493,6 +526,9 @@ class SyncDaemon:
                 self.queued_files.discard(key)
                 self.in_progress_files.add(key)
                 self.active_downloads += 1
+                active = self.active_downloads
+                queued = self.download_queue.qsize()
+            self.write_runtime_status(active_downloads=active, queued_downloads=queued)
 
             try:
                 self.handle_download(rule_id, source_file, dest_path)
@@ -500,6 +536,9 @@ class SyncDaemon:
                 with self.queue_lock:
                     self.in_progress_files.discard(key)
                     self.active_downloads -= 1
+                    active = self.active_downloads
+                    queued = self.download_queue.qsize()
+                self.write_runtime_status(active_downloads=active, queued_downloads=queued)
                 self.download_queue.task_done()
 
     def _allocate_rc_port(self) -> Optional[int]:
@@ -532,15 +571,13 @@ class SyncDaemon:
                 "rc_port": rc_port,
                 "started_at": datetime.now(timezone.utc).isoformat()
             }
-            with open(self.transfers_path, 'w') as f:
-                json.dump(self.active_transfers, f, indent=2)
+            self._write_json_atomic(self.transfers_path, self.active_transfers)
 
     def _unregister_active_transfer(self, rule_id: str, source_file: str) -> None:
         key = self._file_key(rule_id, source_file)
         with self.transfers_lock:
             self.active_transfers.pop(key, None)
-            with open(self.transfers_path, 'w') as f:
-                json.dump(self.active_transfers, f, indent=2)
+            self._write_json_atomic(self.transfers_path, self.active_transfers)
 
     def _mark_download_pending(self, rule_id: str, source_file: str) -> None:
         with self.state_lock:
@@ -742,41 +779,64 @@ class SyncDaemon:
             return
 
         service_name = self.config["rclone_service_name"]
+        active_downloads, queued_downloads = self.get_download_counters()
+        if active_downloads > 0 or queued_downloads > 0:
+            self.log_event(
+                EventType.REFRESH,
+                "refresh skipped because downloads are active or queued",
+                service_name=service_name,
+                active_downloads=active_downloads,
+                queued_downloads=queued_downloads,
+            )
+            return
+
         self.pause_event.set()
+        self.write_runtime_status()
         self.log_event(EventType.REFRESH, "refresh started", service_name=service_name)
 
-        self.wait_for_download_idle(timeout_seconds=600)
-
         try:
-            result = subprocess.run(
-                ["systemctl", "restart", service_name],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
-            )
-            if result.returncode != 0:
-                self.log_error(
-                    EventType.ERROR,
-                    "refresh command failed",
+            active_downloads, queued_downloads = self.get_download_counters()
+            if active_downloads > 0 or queued_downloads > 0:
+                self.log_event(
+                    EventType.REFRESH,
+                    "refresh aborted because downloads were queued after pause",
                     service_name=service_name,
-                    returncode=result.returncode,
-                    error=(result.stderr or result.stdout or "").strip(),
+                    active_downloads=active_downloads,
+                    queued_downloads=queued_downloads,
                 )
+                return
+
+            try:
+                result = subprocess.run(
+                    ["systemctl", "restart", service_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    self.log_error(
+                        EventType.ERROR,
+                        "refresh command failed",
+                        service_name=service_name,
+                        returncode=result.returncode,
+                        error=(result.stderr or result.stdout or "").strip(),
+                    )
+                else:
+                    self.log_event(EventType.REFRESH, "service restarted", service_name=service_name)
+            except subprocess.TimeoutExpired:
+                self.log_error(EventType.ERROR, "refresh timeout", service_name=service_name)
+            except OSError as exc:
+                self.log_error(EventType.ERROR, "refresh process error", service_name=service_name, error=str(exc))
+
+            ready = self.wait_for_mount_ready(total_wait_seconds=120, probe_interval_seconds=5)
+            if ready:
+                self.log_event(EventType.REFRESH, "mount ready after refresh")
             else:
-                self.log_event(EventType.REFRESH, "service restarted", service_name=service_name)
-        except subprocess.TimeoutExpired:
-            self.log_error(EventType.ERROR, "refresh timeout", service_name=service_name)
-        except OSError as exc:
-            self.log_error(EventType.ERROR, "refresh process error", service_name=service_name, error=str(exc))
-
-        ready = self.wait_for_mount_ready(total_wait_seconds=120, probe_interval_seconds=5)
-        if ready:
-            self.log_event(EventType.REFRESH, "mount ready after refresh")
-        else:
-            self.log_error(EventType.ERROR, "mount not ready after refresh timeout")
-
-        self.pause_event.clear()
+                self.log_error(EventType.ERROR, "mount not ready after refresh timeout")
+        finally:
+            self.pause_event.clear()
+            self.write_runtime_status()
 
     def wait_for_mount_ready(self, total_wait_seconds: int, probe_interval_seconds: int) -> bool:
         deadline = time.time() + total_wait_seconds
@@ -848,6 +908,8 @@ class SyncDaemon:
                 drained += 1
             except queue.Empty:
                 break
+
+        self.write_runtime_status()
 
         if drained > 0:
             self.log_event(EventType.SYSTEM, "pending queue drained", dropped_tasks=drained)

@@ -11,3 +11,4 @@ web_panel/SECURITY_REVIEW.md
 sync_state.json*
 sync.log*
 AGENTS.md
+web_panel/Caddyfile.example

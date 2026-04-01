@@ -11,7 +11,7 @@
 - Queues only newly detected files for download
 - Downloads with `rclone copy`
 - Tracks retries, progress, logs, and persistent file state
-- Periodically restarts the rclone mount service to recover from stale mounts
+- Periodically refreshes the rclone mount service, but only when there are no active or queued download tasks
 - Exposes a web panel with config editing, state stats, logs, and real-time transfer progress
 
 This is **not** bidirectional sync, mirror sync, or deletion sync. Local files are never removed by the daemon.
@@ -31,6 +31,7 @@ The daemon and web panel do not talk through direct IPC. They communicate throug
   - config.json
   - sync_state.json
   - active_transfers.json
+  - runtime_status.json
   - sync.log
                 ^
                 |
@@ -86,11 +87,12 @@ Note: because the current implementation increments `retry_count` before compari
 
 Every `rclone_refresh_interval_seconds`, the daemon:
 
-1. pauses scanning
-2. waits for queued and active downloads to drain
-3. restarts the configured rclone systemd service
-4. probes enabled source paths until the mount is ready again
-5. resumes normal scanning
+1. checks whether queued and active downloads are both empty
+2. skips this refresh cycle immediately if download work still exists
+3. pauses scanning only after confirming the daemon is idle
+4. restarts the configured rclone systemd service
+5. probes enabled source paths until the mount is ready again
+6. resumes normal scanning
 
 ### Persistent state and recovery
 
@@ -107,7 +109,7 @@ The web panel provides:
 - log tailing
 - live transfer progress
 
-Saving `/api/config` automatically attempts `systemctl restart sync.service`.
+Saving `/api/config` only attempts `systemctl restart sync.service` when the daemon reports zero active downloads and zero queued downloads; otherwise it saves the config and skips the restart.
 
 ## File State Lifecycle
 

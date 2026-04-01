@@ -208,6 +208,7 @@
                     if (checkResp.ok) {
                         updateCsrfToken(await checkResp.json());
                         if (!socket.connected) {
+                            socket.auth = { csrf_token: csrfToken };
                             socket.connect();
                         }
                         return true;
@@ -501,7 +502,7 @@
                     id: 'sync_service_name',
                     type: 'text',
                     value: config.sync_service_name || 'sync.service',
-                    hintText: '（固定值，保存后自动 systemctl restart）',
+                    hintText: '（固定值，仅在下载与队列空闲时自动 restart）',
                     readOnly: true
                 }
             ];
