@@ -141,7 +141,10 @@ class SyncDaemon:
         self.logger.error(json.dumps(payload, ensure_ascii=False), extra={"event_type": event_type})
 
     def _write_json_atomic(self, path: Path, payload: object) -> None:
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        # Use a per-call unique suffix to avoid races when multiple threads
+        # write the same file concurrently (e.g. multiple download workers
+        # all calling write_runtime_status at the same moment).
+        tmp_path = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
         with tmp_path.open("w", encoding="utf-8") as fp:
             json.dump(payload, fp, indent=2)
             fp.write("\n")
@@ -528,7 +531,10 @@ class SyncDaemon:
                 self.active_downloads += 1
                 active = self.active_downloads
                 queued = self.download_queue.qsize()
-            self.write_runtime_status(active_downloads=active, queued_downloads=queued)
+            try:
+                self.write_runtime_status(active_downloads=active, queued_downloads=queued)
+            except Exception:
+                pass
 
             try:
                 self.handle_download(rule_id, source_file, dest_path)
@@ -538,7 +544,10 @@ class SyncDaemon:
                     self.active_downloads -= 1
                     active = self.active_downloads
                     queued = self.download_queue.qsize()
-                self.write_runtime_status(active_downloads=active, queued_downloads=queued)
+                try:
+                    self.write_runtime_status(active_downloads=active, queued_downloads=queued)
+                except Exception:
+                    pass
                 self.download_queue.task_done()
 
     def _allocate_rc_port(self) -> Optional[int]:
